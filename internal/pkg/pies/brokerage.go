@@ -1,4 +1,4 @@
-package brokerage
+package pies
 
 import (
 	"context"
@@ -79,12 +79,9 @@ type Account struct {
 }
 
 // Brokerage is the main interface that all brokerage implementations must satisfy
-type Brokerage interface {
+type BrokerageClient interface {
 	// Authenticate performs OAuth authentication and stores credentials
 	Authenticate(ctx context.Context) error
-
-	// RefreshToken refreshes the access token if needed
-	RefreshToken(ctx context.Context) error
 
 	// IsAuthenticated checks if the client has valid authentication
 	IsAuthenticated() bool

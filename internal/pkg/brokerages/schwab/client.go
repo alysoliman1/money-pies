@@ -2,15 +2,17 @@ package schwab
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
-	brokerage "github.com/asoliman1/money-pies/pkg/internal/pies"
+	brokerage "github.com/asoliman1/money-pies/internal/pkg/pies"
 )
 
 // Schwab API Documentation Links:
@@ -31,10 +33,10 @@ const (
 
 // Config holds Schwab API configuration
 type Config struct {
-	ClientID     string
-	ClientSecret string
-	RedirectURI  string
-	TokenFile    string // Path to store tokens
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+	RedirectURI  string `json:"redirect_uri"`
+	TokenFile    string `json:"token_file"`
 }
 
 // Token represents OAuth tokens
@@ -47,7 +49,7 @@ type Token struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// Client implements the brokerage.Brokerage interface for Schwab
+// Client implements the brokerage.BrokerageClient interface for Schwab
 type Client struct {
 	config     Config
 	httpClient *http.Client
@@ -56,13 +58,37 @@ type Client struct {
 
 // NewClient creates a new Schwab client
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/documentation/Retail%20Trader%20API%20Production
-func NewClient(config Config) *Client {
+func NewClient(config Config, timeoutInSeconds int) *Client {
 	return &Client{
 		config: config,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+func (c *Client) SetToken(token Token) {
+	c.token = &token
+	rawToken, err := json.Marshal(token)
+	if err != nil {
+		return
+	}
+	os.WriteFile(c.config.TokenFile, rawToken, 0644)
+}
+
+func (c *Client) SetTokenFromFile() {
+	rawToken, err := os.ReadFile(c.config.TokenFile)
+	if err != nil {
+		return
+	}
+
+	var token Token
+	if err := json.Unmarshal(rawToken, &token); err != nil {
+		fmt.Printf("failed to unmarshal token")
+		return
+	}
+
+	c.token = &token
 }
 
 // Authenticate performs OAuth 2.0 authentication flow
@@ -94,14 +120,15 @@ func (c *Client) exchangeCodeForToken(ctx context.Context, code string) error {
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
 	data.Set("redirect_uri", c.config.RedirectURI)
-	data.Set("client_id", c.config.ClientID)
-	data.Set("client_secret", c.config.ClientSecret)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create token request: %w", err)
 	}
 
+	credentials := fmt.Sprintf("%s:%s", c.config.ClientID, c.config.ClientSecret)
+	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(credentials))
+	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", encodedCredentials))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.httpClient.Do(req)
@@ -125,14 +152,14 @@ func (c *Client) exchangeCodeForToken(ctx context.Context, code string) error {
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	c.token = &token
+	c.SetToken(token)
 
 	return nil
 }
 
 // RefreshToken refreshes the access token using the refresh token
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/documentation/Retail%20Trader%20API%20Production
-func (c *Client) RefreshToken(ctx context.Context) error {
+func (c *Client) refreshToken(ctx context.Context) error {
 	if c.token == nil || c.token.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available")
 	}
@@ -140,14 +167,14 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", c.token.RefreshToken)
-	data.Set("client_id", c.config.ClientID)
-	data.Set("client_secret", c.config.ClientSecret)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return fmt.Errorf("failed to create refresh token request: %w", err)
 	}
 
+	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", c.config.ClientID, c.config.ClientSecret)))
+	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", encodedCredentials))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := c.httpClient.Do(req)
@@ -171,7 +198,7 @@ func (c *Client) RefreshToken(ctx context.Context) error {
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	c.token = &token
+	c.SetToken(token)
 
 	return nil
 }
@@ -185,7 +212,7 @@ func (c *Client) IsAuthenticated() bool {
 func (c *Client) makeRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	// Check if token needs refresh
 	if c.token != nil && time.Now().Add(5*time.Minute).After(c.token.ExpiresAt) {
-		if err := c.RefreshToken(ctx); err != nil {
+		if err := c.refreshToken(ctx); err != nil {
 			return nil, fmt.Errorf("failed to refresh token: %w", err)
 		}
 	}
@@ -403,7 +430,7 @@ func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokera
 // GetOrder retrieves a specific order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders/{orderId}
-func (c *Client) GetOrder(ctx context.Context, accountID string, orderID string) (*brokerage.Order, error) {
+func (c *Client) GetOrderStatus(ctx context.Context, accountID string, orderID string) (*brokerage.Order, error) {
 	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, accountID, orderID)
 	resp, err := c.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
@@ -467,7 +494,7 @@ func (c *Client) GetOrder(ctx context.Context, accountID string, orderID string)
 // CancelOrder cancels a pending order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: DELETE /trader/v1/accounts/{accountId}/orders/{orderId}
-func (c *Client) CancelOrder(ctx context.Context, accountID string, orderID string) error {
+func (c *Client) CancelPendingOrder(ctx context.Context, accountID string, orderID string) error {
 	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, accountID, orderID)
 	resp, err := c.makeRequest(ctx, "DELETE", path, nil)
 	if err != nil {
@@ -486,7 +513,7 @@ func (c *Client) CancelOrder(ctx context.Context, accountID string, orderID stri
 // GetOrders retrieves recent orders
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders
-func (c *Client) GetOrders(ctx context.Context, accountID string, limit int) ([]brokerage.Order, error) {
+func (c *Client) GetRecentOrders(ctx context.Context, accountID string, limit int) ([]brokerage.Order, error) {
 	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, accountID, limit)
 	resp, err := c.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
