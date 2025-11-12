@@ -31,7 +31,7 @@ func main() {
 	timeoutInSeconds := 30
 	schwabClient := schwab.
 		NewClient(config, timeoutInSeconds).
-		SetTokenFromFile()
+		SetAccessTokenFromFile()
 
 	if !schwabClient.IsAuthenticated() {
 		fmt.Println("not authenticated. please run oauth flow")
