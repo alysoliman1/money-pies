@@ -67,55 +67,42 @@ func NewClient(config Config, timeoutInSeconds int) *Client {
 	}
 }
 
-func (c *Client) SetToken(token Token) {
+func (c *Client) GetAuthURL() string {
+	return fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code",
+		authURL,
+		url.QueryEscape(c.config.ClientID),
+		url.QueryEscape(c.config.RedirectURI),
+	)
+}
+
+func (c *Client) SetAccessToken(token Token) *Client {
 	c.token = &token
 	rawToken, err := json.Marshal(token)
 	if err != nil {
-		return
+		return c
 	}
 	os.WriteFile(c.config.TokenFile, rawToken, 0644)
+	return c
 }
 
-func (c *Client) SetTokenFromFile() {
+func (c *Client) SetAccessTokenFromFile() *Client {
 	rawToken, err := os.ReadFile(c.config.TokenFile)
 	if err != nil {
-		return
+		return c
 	}
 
 	var token Token
 	if err := json.Unmarshal(rawToken, &token); err != nil {
 		fmt.Printf("failed to unmarshal token")
-		return
+		return c
 	}
 
 	c.token = &token
-}
-
-// Authenticate performs OAuth 2.0 authentication flow
-// Documentation: https://developer.schwab.com/products/trader-api--individual/details/documentation/Retail%20Trader%20API%20Production
-// OAuth Flow: Authorization Code Grant
-func (c *Client) Authenticate(ctx context.Context) error {
-	// Step 1: Get authorization code
-	authURLWithParams := fmt.Sprintf("%s?client_id=%s&redirect_uri=%s&response_type=code",
-		authURL,
-		url.QueryEscape(c.config.ClientID),
-		url.QueryEscape(c.config.RedirectURI),
-	)
-
-	fmt.Println("Please visit the following URL to authorize the application:")
-	fmt.Println(authURLWithParams)
-	fmt.Println("\nAfter authorization, you will be redirected to your redirect URI with a 'code' parameter.")
-	fmt.Print("Enter the authorization code: ")
-
-	var authCode string
-	fmt.Scanln(&authCode)
-
-	// Step 2: Exchange authorization code for tokens
-	return c.exchangeCodeForToken(ctx, authCode)
+	return c
 }
 
 // exchangeCodeForToken exchanges the authorization code for access and refresh tokens
-func (c *Client) exchangeCodeForToken(ctx context.Context, code string) error {
+func (c *Client) ExchangeAuthCodeForAccessToken(ctx context.Context, code string) error {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
@@ -152,7 +139,7 @@ func (c *Client) exchangeCodeForToken(ctx context.Context, code string) error {
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	c.SetToken(token)
+	c.SetAccessToken(token)
 
 	return nil
 }
@@ -198,7 +185,7 @@ func (c *Client) refreshToken(ctx context.Context) error {
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
-	c.SetToken(token)
+	c.SetAccessToken(token)
 
 	return nil
 }

@@ -11,13 +11,13 @@ import (
 )
 
 func main() {
-	configLocation := os.Getenv("CONFIG_FILE_LOCATION")
-	if configLocation == "" {
-		fmt.Println("config location not found")
+	configFileLocation := os.Getenv("CONFIG_FILE_LOCATION")
+	if configFileLocation == "" {
+		fmt.Println("brokerage config file location not found")
 		return
 	}
 
-	rawConfig, err := os.ReadFile(configLocation)
+	rawConfig, err := os.ReadFile(configFileLocation)
 	if err != nil {
 		log.Fatalf("failed to read config file: %v", err)
 	}
@@ -29,23 +29,13 @@ func main() {
 	}
 
 	timeoutInSeconds := 30
-	schwabClient := schwab.NewClient(config, timeoutInSeconds)
-
-	ctx := context.Background()
-
-	schwabClient.SetTokenFromFile()
+	schwabClient := schwab.
+		NewClient(config, timeoutInSeconds).
+		SetTokenFromFile()
 
 	if !schwabClient.IsAuthenticated() {
-		if err := schwabClient.Authenticate(ctx); err != nil {
-			fmt.Printf("failed to authenticate: %v", err)
-			return
-		}
-
-		if !schwabClient.IsAuthenticated() {
-			fmt.Println("failed to authenticate")
-			return
-		}
+		fmt.Println("not authenticated. please run oauth flow")
 	}
 
-	fmt.Println(schwabClient.GetQuote(ctx, "HLAL"))
+	fmt.Println(schwabClient.GetAccounts(context.Background()))
 }

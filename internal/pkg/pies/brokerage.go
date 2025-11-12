@@ -80,9 +80,6 @@ type Account struct {
 
 // Brokerage is the main interface that all brokerage implementations must satisfy
 type BrokerageClient interface {
-	// Authenticate performs OAuth authentication and stores credentials
-	Authenticate(ctx context.Context) error
-
 	// IsAuthenticated checks if the client has valid authentication
 	IsAuthenticated() bool
 
