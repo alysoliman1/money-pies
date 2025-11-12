@@ -1,5 +1,10 @@
 package pies
 
+import (
+	"context"
+	"fmt"
+)
+
 type Pie struct {
 	ID          string
 	Name        string
@@ -24,4 +29,10 @@ type Asset struct {
 type Investor struct {
 	Account         Account
 	BrokerageClient BrokerageClient
+}
+
+func (i *Investor) GetPieStatus(ctx context.Context, pie Pie) {
+	if i.BrokerageClient != nil {
+		fmt.Println(i.BrokerageClient.GetAccounts(ctx))
+	}
 }

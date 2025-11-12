@@ -23,12 +23,13 @@ import (
 
 const (
 	// Schwab API endpoints
-	baseURL      = "https://api.schwabapi.com"
-	authURL      = "https://api.schwabapi.com/v1/oauth/authorize"
-	tokenURL     = "https://api.schwabapi.com/v1/oauth/token"
-	accountsPath = "/trader/v1/accounts"
-	ordersPath   = "/trader/v1/accounts/%s/orders"
-	quotesPath   = "/marketdata/v1/quotes"
+	baseURL             = "https://api.schwabapi.com"
+	authURL             = "https://api.schwabapi.com/v1/oauth/authorize"
+	tokenURL            = "https://api.schwabapi.com/v1/oauth/token"
+	accountsPath        = "/trader/v1/accounts"
+	accountsNumbersPath = "/trader/v1/accounts/accountNumbers"
+	ordersPath          = "/trader/v1/accounts/%s/orders"
+	quotesPath          = "/marketdata/v1/quotes"
 )
 
 // Config holds Schwab API configuration
@@ -85,7 +86,7 @@ func (c *Client) SetAccessToken(token Token) *Client {
 	return c
 }
 
-func (c *Client) SetAccessTokenFromFile() *Client {
+func (c *Client) GetAccessTokenFromFile() *Client {
 	rawToken, err := os.ReadFile(c.config.TokenFile)
 	if err != nil {
 		return c
@@ -214,7 +215,6 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body io.R
 	}
 
 	req.Header.Set("Authorization", "Bearer "+c.token.AccessToken)
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
