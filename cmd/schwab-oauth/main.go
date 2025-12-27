@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/asoliman1/money-pies/internal/pkg/brokerages/schwab"
+	"github.com/asoliman1/money-pies/internal/pkg/clients/schwab"
 	"github.com/pkg/browser"
 )
 

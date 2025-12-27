@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	brokerage "github.com/asoliman1/money-pies/internal/pkg/pies"
+	"github.com/asoliman1/money-pies/internal/pkg/investor"
 )
 
 // Schwab API Documentation Links:
@@ -33,6 +33,7 @@ const (
 )
 
 // Config holds Schwab API configuration
+// This is the schema for the schwab/client-config.json file.
 type Config struct {
 	ClientID     string `json:"client_id"`
 	ClientSecret string `json:"client_secret"`
@@ -214,6 +215,10 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body io.R
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	if method == "POST" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	//req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token.AccessToken)
 
 	resp, err := c.httpClient.Do(req)
@@ -224,11 +229,22 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body io.R
 	return resp, nil
 }
 
-// GetAccounts retrieves all accounts
-// Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
-// Endpoint: GET /trader/v1/accounts
-func (c *Client) GetAccounts(ctx context.Context) ([]brokerage.Account, error) {
-	resp, err := c.makeRequest(ctx, "GET", accountsPath, nil)
+type TradingAccount struct {
+	AccountNumber              string
+	HashValue                  string
+	Client                     *Client
+	Type                       string
+	CashAvailableForTrading    float64
+	CashAvailableForWithdrawal float64
+	TotalCash                  float64
+	LongMarketValue            float64
+	ShortMarketValue           float64
+	PendingDeposits            float64
+}
+
+// NewTradingAccount creates a new trading account
+func NewTradingAccount(ctx context.Context, client *Client, accountNumber string) (*TradingAccount, error) {
+	resp, err := client.makeRequest(ctx, "GET", accountsNumbersPath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -243,46 +259,100 @@ func (c *Client) GetAccounts(ctx context.Context) ([]brokerage.Account, error) {
 		return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var schwabAccounts []struct {
-		SecuritiesAccount struct {
-			AccountNumber   string `json:"accountNumber"`
-			Type            string `json:"type"`
-			AccountID       string `json:"accountId"`
-			CurrentBalances struct {
-				CashBalance float64 `json:"cashBalance"`
-				BuyingPower float64 `json:"buyingPower"`
-				MarketValue float64 `json:"longMarketValue"`
-			} `json:"currentBalances"`
-		} `json:"securitiesAccount"`
+	var schwabAccountsNumbers []struct {
+		AccountNumber string `json:"accountNumber"`
+		HashValue     string `json:"hashValue"`
 	}
 
-	if err := json.Unmarshal(body, &schwabAccounts); err != nil {
+	if err := json.Unmarshal(body, &schwabAccountsNumbers); err != nil {
 		return nil, fmt.Errorf("failed to parse accounts response: %w", err)
 	}
 
-	accounts := make([]brokerage.Account, 0, len(schwabAccounts))
-	for _, sa := range schwabAccounts {
-		acc := sa.SecuritiesAccount
-		accounts = append(accounts, brokerage.Account{
-			AccountID:     acc.AccountID,
-			AccountNumber: acc.AccountNumber,
-			Type:          acc.Type,
-			CashBalance:   acc.CurrentBalances.CashBalance,
-			BuyingPower:   acc.CurrentBalances.BuyingPower,
-			MarketValue:   acc.CurrentBalances.MarketValue,
-			TotalValue:    acc.CurrentBalances.CashBalance + acc.CurrentBalances.MarketValue,
-		})
-	}
+	for _, account := range schwabAccountsNumbers {
+		if account.AccountNumber == accountNumber {
+			resp, err := client.makeRequest(ctx, "GET", fmt.Sprintf("%s/%s", accountsPath, account.HashValue), nil)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
 
-	return accounts, nil
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read accounts response: %w", err)
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode, string(body))
+			}
+
+			var schwabAccount struct {
+				SecuritiesAccount struct {
+					Type            string `json:"type"`
+					CurrentBalances struct {
+						CashAvailableForTrading    float64 `json:"cashAvailableForTrading"`
+						CashAvailableForWithdrawal float64 `json:"cashAvailableForWithdrawal"`
+						TotalCash                  float64 `json:"totalCash"`
+						LongMarketValue            float64 `json:"longMarketValue"`
+						ShortMarketValue           float64 `json:"shortMarketValue"`
+						PendingDeposits            float64 `json:"pendingDeposits"`
+					} `json:"currentBalances"`
+				} `json:"securitiesAccount"`
+			}
+			if err := json.Unmarshal(body, &schwabAccount); err != nil {
+				return nil, fmt.Errorf("failed to parse account response: %w", err)
+			}
+
+			return &TradingAccount{
+				AccountNumber:              account.AccountNumber,
+				CashAvailableForTrading:    schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForTrading,
+				CashAvailableForWithdrawal: schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForWithdrawal,
+				TotalCash:                  schwabAccount.SecuritiesAccount.CurrentBalances.TotalCash,
+				LongMarketValue:            schwabAccount.SecuritiesAccount.CurrentBalances.LongMarketValue,
+				ShortMarketValue:           schwabAccount.SecuritiesAccount.CurrentBalances.ShortMarketValue,
+				PendingDeposits:            schwabAccount.SecuritiesAccount.CurrentBalances.PendingDeposits,
+				Type:                       schwabAccount.SecuritiesAccount.Type,
+				HashValue:                  account.HashValue,
+				Client:                     client,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("account number not found")
+}
+
+func (c *TradingAccount) GetTotalCash(ctx context.Context) (float64, error) {
+	return c.TotalCash, nil
+}
+
+func (c *TradingAccount) GetCashAvailableForTrading(ctx context.Context) (float64, error) {
+	return c.CashAvailableForTrading, nil
+}
+
+func (c *TradingAccount) GetCashAvailableForWithdrawal(ctx context.Context) (float64, error) {
+	return c.CashAvailableForWithdrawal, nil
+}
+
+func (c *TradingAccount) GetLongMarketValue(ctx context.Context) (float64, error) {
+	return c.LongMarketValue, nil
+}
+
+func (c *TradingAccount) GetShortMarketValue(ctx context.Context) (float64, error) {
+	return c.ShortMarketValue, nil
+}
+
+func (c *TradingAccount) GetPendingDeposits(ctx context.Context) (float64, error) {
+	return c.PendingDeposits, nil
+}
+
+func (c *TradingAccount) GetType(ctx context.Context) (string, error) {
+	return c.Type, nil
 }
 
 // GetPositions retrieves positions for a specific account
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}
-func (c *Client) GetPositions(ctx context.Context, accountID string) ([]brokerage.Position, error) {
-	path := fmt.Sprintf("%s/%s?fields=positions", accountsPath, accountID)
-	resp, err := c.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetPositions(ctx context.Context) ([]investor.Position, error) {
+	path := fmt.Sprintf("%s/%s?fields=positions", accountsPath, c.HashValue)
+	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -316,7 +386,7 @@ func (c *Client) GetPositions(ctx context.Context, accountID string) ([]brokerag
 		return nil, fmt.Errorf("failed to parse positions response: %w", err)
 	}
 
-	positions := make([]brokerage.Position, 0, len(accountData.SecuritiesAccount.Positions))
+	positions := make([]investor.Position, 0, len(accountData.SecuritiesAccount.Positions))
 	for _, p := range accountData.SecuritiesAccount.Positions {
 		quantity := p.LongQuantity - p.ShortQuantity
 		currentPrice := 0.0
@@ -330,7 +400,7 @@ func (c *Client) GetPositions(ctx context.Context, accountID string) ([]brokerag
 			unrealizedPLPct = (unrealizedPL / (p.AveragePrice * quantity)) * 100
 		}
 
-		positions = append(positions, brokerage.Position{
+		positions = append(positions, investor.Position{
 			Symbol:          p.Instrument.Symbol,
 			Quantity:        quantity,
 			AveragePrice:    p.AveragePrice,
@@ -347,18 +417,18 @@ func (c *Client) GetPositions(ctx context.Context, accountID string) ([]brokerag
 // PlaceOrder submits a new order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: POST /trader/v1/accounts/{accountId}/orders
-func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokerage.OrderRequest) (*brokerage.Order, error) {
+func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderRequest) (*investor.Order, error) {
 	// Build Schwab order structure
-	schwabOrder := map[string]interface{}{
+	schwabOrder := map[string]any{
 		"orderType":         string(order.Type),
 		"session":           "NORMAL",
 		"duration":          "DAY",
 		"orderStrategyType": "SINGLE",
-		"orderLegCollection": []map[string]interface{}{
+		"orderLegCollection": []map[string]any{
 			{
 				"instruction": string(order.Action),
 				"quantity":    order.Quantity,
-				"instrument": map[string]interface{}{
+				"instrument": map[string]any{
 					"symbol":    order.Symbol,
 					"assetType": "EQUITY",
 				},
@@ -367,7 +437,7 @@ func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokera
 	}
 
 	// Add price for limit orders
-	if order.Type == brokerage.OrderTypeLimit && order.LimitPrice != nil {
+	if order.Type == investor.OrderTypeLimit && order.LimitPrice != nil {
 		schwabOrder["price"] = *order.LimitPrice
 	}
 
@@ -376,8 +446,8 @@ func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokera
 		return nil, fmt.Errorf("failed to marshal order: %w", err)
 	}
 
-	path := fmt.Sprintf(ordersPath, accountID)
-	resp, err := c.makeRequest(ctx, "POST", path, strings.NewReader(string(orderJSON)))
+	path := fmt.Sprintf(ordersPath, c.HashValue)
+	resp, err := c.Client.makeRequest(ctx, "POST", path, strings.NewReader(string(orderJSON)))
 	if err != nil {
 		return nil, err
 	}
@@ -401,14 +471,14 @@ func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokera
 		}
 	}
 
-	return &brokerage.Order{
+	return &investor.Order{
 		ID:          orderID,
 		Symbol:      order.Symbol,
 		Action:      order.Action,
 		Type:        order.Type,
 		Quantity:    order.Quantity,
 		LimitPrice:  order.LimitPrice,
-		Status:      brokerage.OrderStatusPending,
+		Status:      investor.OrderStatusPending,
 		SubmittedAt: time.Now(),
 		RawResponse: string(body),
 	}, nil
@@ -417,9 +487,9 @@ func (c *Client) PlaceOrder(ctx context.Context, accountID string, order brokera
 // GetOrder retrieves a specific order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders/{orderId}
-func (c *Client) GetOrderStatus(ctx context.Context, accountID string, orderID string) (*brokerage.Order, error) {
-	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, accountID, orderID)
-	resp, err := c.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*investor.Order, error) {
+	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.HashValue, orderID)
+	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -454,19 +524,19 @@ func (c *Client) GetOrderStatus(ctx context.Context, accountID string, orderID s
 		return nil, fmt.Errorf("failed to parse order response: %w", err)
 	}
 
-	order := &brokerage.Order{
+	order := &investor.Order{
 		ID:          fmt.Sprintf("%d", schwabOrder.OrderID),
-		Status:      c.convertOrderStatus(schwabOrder.Status),
+		Status:      convertOrderStatus(schwabOrder.Status),
 		Quantity:    schwabOrder.Quantity,
 		FilledQty:   schwabOrder.FilledQuantity,
 		FilledPrice: schwabOrder.Price,
-		Type:        brokerage.OrderType(schwabOrder.OrderType),
+		Type:        investor.OrderType(schwabOrder.OrderType),
 		RawResponse: string(body),
 	}
 
 	if len(schwabOrder.OrderLegCollection) > 0 {
 		order.Symbol = schwabOrder.OrderLegCollection[0].Instrument.Symbol
-		order.Action = brokerage.OrderAction(schwabOrder.OrderLegCollection[0].Instruction)
+		order.Action = investor.OrderAction(schwabOrder.OrderLegCollection[0].Instruction)
 	}
 
 	if schwabOrder.EnteredTime != "" {
@@ -481,9 +551,9 @@ func (c *Client) GetOrderStatus(ctx context.Context, accountID string, orderID s
 // CancelOrder cancels a pending order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: DELETE /trader/v1/accounts/{accountId}/orders/{orderId}
-func (c *Client) CancelPendingOrder(ctx context.Context, accountID string, orderID string) error {
-	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, accountID, orderID)
-	resp, err := c.makeRequest(ctx, "DELETE", path, nil)
+func (c *TradingAccount) CancelPendingOrder(ctx context.Context, orderID string) error {
+	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.HashValue, orderID)
+	resp, err := c.Client.makeRequest(ctx, "DELETE", path, nil)
 	if err != nil {
 		return err
 	}
@@ -500,9 +570,9 @@ func (c *Client) CancelPendingOrder(ctx context.Context, accountID string, order
 // GetOrders retrieves recent orders
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders
-func (c *Client) GetRecentOrders(ctx context.Context, accountID string, limit int) ([]brokerage.Order, error) {
-	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, accountID, limit)
-	resp, err := c.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]investor.Order, error) {
+	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, c.HashValue, limit)
+	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -537,20 +607,20 @@ func (c *Client) GetRecentOrders(ctx context.Context, accountID string, limit in
 		return nil, fmt.Errorf("failed to parse orders response: %w", err)
 	}
 
-	orders := make([]brokerage.Order, 0, len(schwabOrders))
+	orders := make([]investor.Order, 0, len(schwabOrders))
 	for _, so := range schwabOrders {
-		order := brokerage.Order{
+		order := investor.Order{
 			ID:          fmt.Sprintf("%d", so.OrderID),
-			Status:      c.convertOrderStatus(so.Status),
+			Status:      convertOrderStatus(so.Status),
 			Quantity:    so.Quantity,
 			FilledQty:   so.FilledQuantity,
 			FilledPrice: so.Price,
-			Type:        brokerage.OrderType(so.OrderType),
+			Type:        investor.OrderType(so.OrderType),
 		}
 
 		if len(so.OrderLegCollection) > 0 {
 			order.Symbol = so.OrderLegCollection[0].Instrument.Symbol
-			order.Action = brokerage.OrderAction(so.OrderLegCollection[0].Instruction)
+			order.Action = investor.OrderAction(so.OrderLegCollection[0].Instruction)
 		}
 
 		if so.EnteredTime != "" {
@@ -568,9 +638,9 @@ func (c *Client) GetRecentOrders(ctx context.Context, accountID string, limit in
 // GetQuote retrieves a quote for a symbol
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /marketdata/v1/quotes
-func (c *Client) GetQuote(ctx context.Context, symbol string) (map[string]interface{}, error) {
-	path := fmt.Sprintf("%s?symbols=%s", quotesPath, url.QueryEscape(symbol))
-	resp, err := c.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetRegularMarketLatestPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
+	path := fmt.Sprintf("%s?symbols=%s", quotesPath, url.QueryEscape(strings.Join(symbols, ",")))
+	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -585,24 +655,32 @@ func (c *Client) GetQuote(ctx context.Context, symbol string) (map[string]interf
 		return nil, fmt.Errorf("get quote failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
-	var quotes map[string]interface{}
+	var quotes map[string]struct {
+		Regular struct {
+			RegularMarketLastPrice float64 `json:"regularMarketLastPrice"`
+		} `json:"regular"`
+	}
 	if err := json.Unmarshal(body, &quotes); err != nil {
 		return nil, fmt.Errorf("failed to parse quote response: %w", err)
 	}
+	prices := make(map[string]float64)
+	for symbol, quote := range quotes {
+		prices[symbol] = quote.Regular.RegularMarketLastPrice
+	}
 
-	return quotes, nil
+	return prices, nil
 }
 
 // convertOrderStatus converts Schwab order status to our standard status
-func (c *Client) convertOrderStatus(status string) brokerage.OrderStatus {
+func convertOrderStatus(status string) investor.OrderStatus {
 	switch strings.ToUpper(status) {
 	case "FILLED":
-		return brokerage.OrderStatusFilled
+		return investor.OrderStatusFilled
 	case "CANCELED", "CANCELLED":
-		return brokerage.OrderStatusCancelled
+		return investor.OrderStatusCancelled
 	case "REJECTED":
-		return brokerage.OrderStatusRejected
+		return investor.OrderStatusRejected
 	default:
-		return brokerage.OrderStatusPending
+		return investor.OrderStatusPending
 	}
 }
