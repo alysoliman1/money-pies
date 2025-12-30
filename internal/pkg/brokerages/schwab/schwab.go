@@ -230,16 +230,16 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body io.R
 }
 
 type TradingAccount struct {
-	AccountNumber              string
-	HashValue                  string
-	Client                     *Client
-	Type                       string
-	CashAvailableForTrading    float64
-	CashAvailableForWithdrawal float64
-	TotalCash                  float64
-	LongMarketValue            float64
-	ShortMarketValue           float64
-	PendingDeposits            float64
+	accountNumber              string
+	hashValue                  string
+	client                     *Client
+	accountType                string
+	cashAvailableForTrading    float64
+	cashAvailableForWithdrawal float64
+	totalCash                  float64
+	longMarketValue            float64
+	shortMarketValue           float64
+	pendingDeposits            float64
 }
 
 // NewTradingAccount creates a new trading account
@@ -303,56 +303,56 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 			}
 
 			return &TradingAccount{
-				AccountNumber:              account.AccountNumber,
-				CashAvailableForTrading:    schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForTrading,
-				CashAvailableForWithdrawal: schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForWithdrawal,
-				TotalCash:                  schwabAccount.SecuritiesAccount.CurrentBalances.TotalCash,
-				LongMarketValue:            schwabAccount.SecuritiesAccount.CurrentBalances.LongMarketValue,
-				ShortMarketValue:           schwabAccount.SecuritiesAccount.CurrentBalances.ShortMarketValue,
-				PendingDeposits:            schwabAccount.SecuritiesAccount.CurrentBalances.PendingDeposits,
-				Type:                       schwabAccount.SecuritiesAccount.Type,
-				HashValue:                  account.HashValue,
-				Client:                     client,
+				accountNumber:              account.AccountNumber,
+				cashAvailableForTrading:    schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForTrading,
+				cashAvailableForWithdrawal: schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForWithdrawal,
+				totalCash:                  schwabAccount.SecuritiesAccount.CurrentBalances.TotalCash,
+				longMarketValue:            schwabAccount.SecuritiesAccount.CurrentBalances.LongMarketValue,
+				shortMarketValue:           schwabAccount.SecuritiesAccount.CurrentBalances.ShortMarketValue,
+				pendingDeposits:            schwabAccount.SecuritiesAccount.CurrentBalances.PendingDeposits,
+				accountType:                schwabAccount.SecuritiesAccount.Type,
+				hashValue:                  account.HashValue,
+				client:                     client,
 			}, nil
 		}
 	}
 	return nil, fmt.Errorf("account number not found")
 }
 
-func (c *TradingAccount) GetTotalCash(ctx context.Context) (float64, error) {
-	return c.TotalCash, nil
+func (c *TradingAccount) TotalCash(ctx context.Context) (float64, error) {
+	return c.totalCash, nil
 }
 
-func (c *TradingAccount) GetCashAvailableForTrading(ctx context.Context) (float64, error) {
-	return c.CashAvailableForTrading, nil
+func (c *TradingAccount) CashAvailableForTrading(ctx context.Context) (float64, error) {
+	return c.cashAvailableForTrading, nil
 }
 
-func (c *TradingAccount) GetCashAvailableForWithdrawal(ctx context.Context) (float64, error) {
-	return c.CashAvailableForWithdrawal, nil
+func (c *TradingAccount) CashAvailableForWithdrawal(ctx context.Context) (float64, error) {
+	return c.cashAvailableForWithdrawal, nil
 }
 
-func (c *TradingAccount) GetLongMarketValue(ctx context.Context) (float64, error) {
-	return c.LongMarketValue, nil
+func (c *TradingAccount) LongMarketValue(ctx context.Context) (float64, error) {
+	return c.longMarketValue, nil
 }
 
-func (c *TradingAccount) GetShortMarketValue(ctx context.Context) (float64, error) {
-	return c.ShortMarketValue, nil
+func (c *TradingAccount) ShortMarketValue(ctx context.Context) (float64, error) {
+	return c.shortMarketValue, nil
 }
 
-func (c *TradingAccount) GetPendingDeposits(ctx context.Context) (float64, error) {
-	return c.PendingDeposits, nil
+func (c *TradingAccount) PendingDeposits(ctx context.Context) (float64, error) {
+	return c.pendingDeposits, nil
 }
 
-func (c *TradingAccount) GetType(ctx context.Context) (string, error) {
-	return c.Type, nil
+func (c *TradingAccount) Type(ctx context.Context) (string, error) {
+	return c.accountType, nil
 }
 
 // GetPositions retrieves positions for a specific account
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}
-func (c *TradingAccount) GetPositions(ctx context.Context) ([]investor.Position, error) {
-	path := fmt.Sprintf("%s/%s?fields=positions", accountsPath, c.HashValue)
-	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) Positions(ctx context.Context) ([]investor.Position, error) {
+	path := fmt.Sprintf("%s/%s?fields=positions", accountsPath, c.hashValue)
+	resp, err := c.client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +417,7 @@ func (c *TradingAccount) GetPositions(ctx context.Context) ([]investor.Position,
 // PlaceOrder submits a new order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: POST /trader/v1/accounts/{accountId}/orders
-func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderRequest) (*investor.Order, error) {
+func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderRequest) (*investor.TradeOrder, error) {
 	// Build Schwab order structure
 	schwabOrder := map[string]any{
 		"orderType":         string(order.Type),
@@ -446,8 +446,8 @@ func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderReq
 		return nil, fmt.Errorf("failed to marshal order: %w", err)
 	}
 
-	path := fmt.Sprintf(ordersPath, c.HashValue)
-	resp, err := c.Client.makeRequest(ctx, "POST", path, strings.NewReader(string(orderJSON)))
+	path := fmt.Sprintf(ordersPath, c.hashValue)
+	resp, err := c.client.makeRequest(ctx, "POST", path, strings.NewReader(string(orderJSON)))
 	if err != nil {
 		return nil, err
 	}
@@ -471,7 +471,7 @@ func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderReq
 		}
 	}
 
-	return &investor.Order{
+	return &investor.TradeOrder{
 		ID:          orderID,
 		Symbol:      order.Symbol,
 		Action:      order.Action,
@@ -487,9 +487,9 @@ func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderReq
 // GetOrder retrieves a specific order
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders/{orderId}
-func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*investor.Order, error) {
-	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.HashValue, orderID)
-	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*investor.TradeOrder, error) {
+	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.hashValue, orderID)
+	resp, err := c.client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +524,7 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 		return nil, fmt.Errorf("failed to parse order response: %w", err)
 	}
 
-	order := &investor.Order{
+	order := &investor.TradeOrder{
 		ID:          fmt.Sprintf("%d", schwabOrder.OrderID),
 		Status:      convertOrderStatus(schwabOrder.Status),
 		Quantity:    schwabOrder.Quantity,
@@ -552,8 +552,8 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: DELETE /trader/v1/accounts/{accountId}/orders/{orderId}
 func (c *TradingAccount) CancelPendingOrder(ctx context.Context, orderID string) error {
-	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.HashValue, orderID)
-	resp, err := c.Client.makeRequest(ctx, "DELETE", path, nil)
+	path := fmt.Sprintf("%s/%s/orders/%s", accountsPath, c.hashValue, orderID)
+	resp, err := c.client.makeRequest(ctx, "DELETE", path, nil)
 	if err != nil {
 		return err
 	}
@@ -570,9 +570,9 @@ func (c *TradingAccount) CancelPendingOrder(ctx context.Context, orderID string)
 // GetOrders retrieves recent orders
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders
-func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]investor.Order, error) {
-	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, c.HashValue, limit)
-	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
+func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]investor.TradeOrder, error) {
+	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, c.hashValue, limit)
+	resp, err := c.client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -607,9 +607,9 @@ func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]inve
 		return nil, fmt.Errorf("failed to parse orders response: %w", err)
 	}
 
-	orders := make([]investor.Order, 0, len(schwabOrders))
+	orders := make([]investor.TradeOrder, 0, len(schwabOrders))
 	for _, so := range schwabOrders {
-		order := investor.Order{
+		order := investor.TradeOrder{
 			ID:          fmt.Sprintf("%d", so.OrderID),
 			Status:      convertOrderStatus(so.Status),
 			Quantity:    so.Quantity,
@@ -638,9 +638,9 @@ func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]inve
 // GetQuote retrieves a quote for a symbol
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /marketdata/v1/quotes
-func (c *TradingAccount) GetRegularMarketLatestPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
+func (c *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
 	path := fmt.Sprintf("%s?symbols=%s", quotesPath, url.QueryEscape(strings.Join(symbols, ",")))
-	resp, err := c.Client.makeRequest(ctx, "GET", path, nil)
+	resp, err := c.client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
 	}

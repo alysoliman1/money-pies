@@ -6,35 +6,6 @@ import (
 	"math"
 )
 
-type Pie struct {
-	ID          string
-	Name        string
-	Description string
-	Slices      []Slice
-}
-
-func (p *Pie) GetSymbols() []string {
-	symbols := []string{}
-	for _, slice := range p.Slices {
-		symbols = append(symbols, slice.Asset.Symbol)
-	}
-	return symbols
-}
-
-type Slice struct {
-	Weight float64
-	Asset  Asset
-}
-
-type Asset struct {
-	TypeName string
-	ID       string
-	IsActive bool
-	Name     string
-	Symbol   string
-	Status   string
-}
-
 type Investor struct {
 	Account TradingAccount
 }
@@ -46,85 +17,161 @@ func NewInvestor(account TradingAccount) *Investor {
 	}
 }
 
-// GetPieStatus retrieves the status of a pie
-func (i *Investor) GetPieStatus(ctx context.Context, pie Pie) {
-	if i.Account == nil {
-		return
-	}
-	positions, err := i.Account.GetPositions(ctx)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	positionsMap := make(map[string]Position)
-	for _, position := range positions {
-		positionsMap[position.Symbol] = position
-	}
-	for _, slice := range pie.Slices {
-		position, ok := positionsMap[slice.Asset.Symbol]
-		if !ok {
-			fmt.Println("Position not found for symbol:", slice.Asset.Symbol)
-			continue
-		}
-		fmt.Println(position.Symbol, position.Quantity, position.AveragePrice, position.CurrentPrice)
-	}
-}
-
 // PlacePieOrder places an order for a pie
 func (i *Investor) PlacePieOrder(
 	ctx context.Context,
-	amount float64,
+	amountToInvest float64,
 	pie Pie,
+	preInvestedAmounts map[string]float64,
 ) {
 	if i.Account == nil {
 		return
 	}
-	totalCash, err := i.Account.GetCashAvailableForTrading(ctx)
+
+	cashAvailableForTrading, err := i.Account.CashAvailableForTrading(ctx)
 	if err != nil {
-		fmt.Println("Failed to get cash available for trading")
+		fmt.Println("failed to get cash available for trading:", err)
 		return
 	}
-	if amount <= 0 || amount > totalCash {
-		fmt.Println("Amount is not valid")
+
+	if err := validateAmountToInvest(amountToInvest, cashAvailableForTrading); err != nil {
+		fmt.Println(err)
 		return
 	}
-	symbols := pie.GetSymbols()
-	prices, err := i.Account.GetRegularMarketLatestPrices(ctx, symbols)
+
+	fmt.Printf("amount to invest: $%f\n", amountToInvest)
+	fmt.Printf("cash available for trading: $%f\n", cashAvailableForTrading)
+
+	symbolToWeightMap, err := pie.ValidatePie()
 	if err != nil {
-		fmt.Println("Failed to get quotes for symbols:", symbols)
+		fmt.Println("failed to validate pie:", err)
 		return
 	}
-	for _, slice := range pie.Slices {
-		sliceAmount := amount * slice.Weight
-		if sliceAmount <= 0 {
-			fmt.Println("Slice amount is not valid")
-			return
+
+	pieSymbols := []string{}
+	for symbol := range symbolToWeightMap {
+		pieSymbols = append(pieSymbols, symbol)
+	}
+
+	fmt.Printf("pie validated (%d symbols)\n", len(pieSymbols))
+
+	latestPricesMap, err := i.Account.LatestRegularMarketPrices(ctx, pieSymbols)
+	if err != nil {
+		fmt.Println("failed to get quotes for symbols:", pieSymbols, ":", err)
+		return
+	}
+
+	fmt.Printf("quotes retrieved (%d symbols)\n", len(latestPricesMap))
+
+	orders, leftOverAmount, messages, errs := GenerateBuyOrdersRequests(
+		amountToInvest,
+		symbolToWeightMap,
+		latestPricesMap,
+		preInvestedAmounts,
+	)
+	if len(errs) > 0 {
+		for _, err := range errs {
+			fmt.Println(err)
 		}
-		quotePrice := prices[slice.Asset.Symbol]
+		return
+	}
+
+	for _, message := range messages {
+		fmt.Println(message)
+	}
+
+	fmt.Printf("left over amount: $%f\n", leftOverAmount)
+
+	for _, order := range orders {
+		fmt.Println("--------------------------------")
+		fmt.Println(order.Symbol, order.Quantity, order.Action, order.Type)
+		order, err := i.Account.PlaceOrder(ctx, order)
+		if err != nil {
+			fmt.Println("Failed to place order:", err)
+			fmt.Println("--------------------------------")
+			continue
+		}
+		fmt.Println(order.ID, order.Status, order.Quantity, order.Action, order.Type)
+		fmt.Println("--------------------------------")
+	}
+}
+
+func validateAmountToInvest(amountToInvest float64, cashAvailableForTrading float64) error {
+	if amountToInvest <= 0 {
+		return fmt.Errorf("amount to invest ($%f) is not valid", amountToInvest)
+	}
+	if amountToInvest > cashAvailableForTrading {
+		return fmt.Errorf("amount to invest ($%f) is greater than cash available for trading ($%f)", amountToInvest, cashAvailableForTrading)
+	}
+	return nil
+}
+
+// GenerateOrdersRequests generates the orders requests to invest in the pie.
+func GenerateBuyOrdersRequests(
+	amountToInvest float64,
+	symbolToWeightMap map[string]float64,
+	latestPricesMap map[string]float64,
+	preInvestedAmounts map[string]float64,
+) ([]OrderRequest, float64, []string, []error) {
+	leftOverAmount := 0.0
+	orders := []OrderRequest{}
+	messages := []string{}
+	errs := []error{}
+	for symbol, weight := range symbolToWeightMap {
+		weight /= 100
+		if preInvestedAmounts[symbol] >= amountToInvest*weight {
+			message := fmt.Sprintf(
+				"not creating a buy order for symbol %s because pre invested amount ($%f) is sufficient (amount needed is $%f)",
+				symbol,
+				preInvestedAmounts[symbol],
+				amountToInvest*weight,
+			)
+			messages = append(messages, message)
+			continue
+		}
+
+		amountToInvestForSymbol := amountToInvest*weight - preInvestedAmounts[symbol]
+		if amountToInvestForSymbol <= 0 {
+			err := fmt.Errorf(
+				"amount to invest for symbol %s ($%f) is not valid",
+				symbol,
+				amountToInvestForSymbol,
+			)
+			errs = append(errs, err)
+			continue
+		}
+
+		quotePrice := latestPricesMap[symbol]
 		if quotePrice <= 0 {
-			fmt.Println("Quote price is not valid")
-			return
+			err := fmt.Errorf(
+				"quote price for symbol %s ($%f) is not valid",
+				symbol,
+				quotePrice,
+			)
+			errs = append(errs, err)
+			continue
 		}
-		orderQuantity := math.Round(sliceAmount / quotePrice)
-		if orderQuantity <= 0 {
-			fmt.Println("Order quantity is not valid")
-			return
+
+		orderQuantity := math.Floor(amountToInvestForSymbol / quotePrice)
+		if orderQuantity < 1 {
+			err := fmt.Errorf(
+				"not enough money allocated to symbol %s ($%f) to buy shares at $%f a share",
+				symbol,
+				amountToInvestForSymbol,
+				quotePrice,
+			)
+			errs = append(errs, err)
+			continue
 		}
-		fmt.Println("Order quantity:", orderQuantity)
-		order := OrderRequest{
-			Symbol:   slice.Asset.Symbol,
+
+		leftOverAmount += amountToInvestForSymbol - (orderQuantity * quotePrice)
+
+		orders = append(orders, OrderRequest{
+			Symbol:   symbol,
 			Action:   OrderActionBuy,
 			Type:     OrderTypeMarket,
 			Quantity: orderQuantity,
-		}
-		_, err = i.Account.PlaceOrder(ctx, order)
-		if err != nil {
-			fmt.Println(err)
-			fmt.Println("Failed to place order for symbol:", slice.Asset.Symbol)
-			return
-		}
-		fmt.Println("Order placed for symbol:", slice.Asset.Symbol)
+		})
 	}
-
-	// i.BrokerageClient.PlaceOrder(ctx)
+	return orders, leftOverAmount, messages, errs
 }

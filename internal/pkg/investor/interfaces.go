@@ -5,46 +5,62 @@ import (
 	"time"
 )
 
-// TradingAccount is the interface that all trading accounts must satisfy
-// It is used to interact with the trading account and place orders
+// TradingAccount is the interface that all trading accounts must satisfy.
 type TradingAccount interface {
-	GetRegularMarketLatestPrices(ctx context.Context, symbols []string) (map[string]float64, error)
+	// LatestRegularMarketPrices retrieves the latest regular market prices for the given symbols.
+	LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error)
 
-	// GetTotalCash retrieves the total cash of the account
-	GetTotalCash(ctx context.Context) (float64, error)
+	// TotalCash retrieves the total cash amount in the trading account.
+	TotalCash(ctx context.Context) (float64, error)
 
-	// GetCashAvailableForTrading retrieves the cash available for trading of the account
-	GetCashAvailableForTrading(ctx context.Context) (float64, error)
+	// CashAvailableForTrading retrieves the cash available for trading in the trading account.
+	CashAvailableForTrading(ctx context.Context) (float64, error)
 
-	// GetCashAvailableForWithdrawal retrieves the cash available for withdrawal of the account
-	GetCashAvailableForWithdrawal(ctx context.Context) (float64, error)
+	// CashAvailableForWithdrawal retrieves the cash available for withdrawal in the trading account.
+	CashAvailableForWithdrawal(ctx context.Context) (float64, error)
 
-	// GetLongMarketValue retrieves the long market value of the account
-	GetLongMarketValue(ctx context.Context) (float64, error)
+	// GetLongMarketValue retrieves the long market value in the trading account.
+	LongMarketValue(ctx context.Context) (float64, error)
 
-	// GetShortMarketValue retrieves the short market value of the account
-	GetShortMarketValue(ctx context.Context) (float64, error)
+	// GetShortMarketValue retrieves the short market value in the trading account.
+	ShortMarketValue(ctx context.Context) (float64, error)
 
-	// GetPendingDeposits retrieves the pending deposits of the account
-	GetPendingDeposits(ctx context.Context) (float64, error)
+	// GetPendingDeposits retrieves the pending deposits in the trading account.
+	PendingDeposits(ctx context.Context) (float64, error)
 
-	// GetType retrieves the type of the account
-	GetType(ctx context.Context) (string, error)
+	// Type retrieves the type of the trading account.
+	Type(ctx context.Context) (string, error)
 
-	// GetPositions retrieves the current positions for the account
-	GetPositions(ctx context.Context) ([]Position, error)
+	// Positions retrieves the current positions for the account.
+	Positions(ctx context.Context) ([]Position, error)
 
-	// PlaceOrder places a new order for the account
-	PlaceOrder(ctx context.Context, order OrderRequest) (*Order, error)
+	// PlaceOrder places a new order for the account.
+	PlaceOrder(ctx context.Context, order OrderRequest) (*TradeOrder, error)
 
-	// GetOrderStatus retrieves the status of a specific order
-	GetOrderStatus(ctx context.Context, orderID string) (*Order, error)
+	// GetOrderStatus retrieves the status of a specific order.
+	GetOrderStatus(ctx context.Context, orderID string) (*TradeOrder, error)
 
-	// CancelPendingOrder cancels a pending order
+	// CancelPendingOrder cancels a pending order.
 	CancelPendingOrder(ctx context.Context, orderID string) error
 
-	// GetRecentOrders retrieves recent orders for the account
-	GetRecentOrders(ctx context.Context, limit int) ([]Order, error)
+	// GetRecentOrders retrieves recent orders for the account.
+	GetRecentOrders(ctx context.Context, limit int) ([]TradeOrder, error)
+}
+
+// TradeOrder represents a trade order
+type TradeOrder struct {
+	ID          string
+	Symbol      string
+	Action      OrderAction
+	Type        OrderType
+	Quantity    float64
+	LimitPrice  *float64 // Only for limit orders
+	Status      OrderStatus
+	FilledQty   float64
+	FilledPrice float64
+	SubmittedAt time.Time
+	FilledAt    *time.Time
+	RawResponse any // Original response from brokerage
 }
 
 // OrderType represents the type of order (market, limit, etc.)
@@ -72,22 +88,6 @@ const (
 	OrderStatusCancelled OrderStatus = "CANCELLED"
 	OrderStatusRejected  OrderStatus = "REJECTED"
 )
-
-// Order represents a trade order
-type Order struct {
-	ID          string
-	Symbol      string
-	Action      OrderAction
-	Type        OrderType
-	Quantity    float64
-	LimitPrice  *float64 // Only for limit orders
-	Status      OrderStatus
-	FilledQty   float64
-	FilledPrice float64
-	SubmittedAt time.Time
-	FilledAt    *time.Time
-	RawResponse any // Original response from brokerage
-}
 
 // OrderRequest represents a request to place an order
 type OrderRequest struct {
