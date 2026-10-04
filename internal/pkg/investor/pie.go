@@ -58,3 +58,31 @@ func (p *Pie) GetSymbols() []string {
 	}
 	return symbols
 }
+
+// PieFromPositions builds a pie whose weights are the positions' shares of the market value held.
+// Positions without a positive market value, such as short positions, are left out.
+func PieFromPositions(positions []Position) (Pie, error) {
+	total := 0.0
+	for _, position := range positions {
+		if position.MarketValue > 0 {
+			total += position.MarketValue
+		}
+	}
+	if total <= 0 {
+		return Pie{}, fmt.Errorf("there are no positions with a market value")
+	}
+
+	pie := Pie{Name: "Current positions"}
+	for _, position := range positions {
+		if position.MarketValue > 0 {
+			pie.Slices = append(pie.Slices, Slice{
+				Symbol: position.Symbol,
+				Weight: position.MarketValue / total * 100,
+			})
+		}
+	}
+	if len(pie.Slices) < 2 {
+		return Pie{}, fmt.Errorf("a pie needs at least two positions")
+	}
+	return pie, nil
+}

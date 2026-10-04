@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/alpacahq/alpaca-trade-api-go/v3/alpaca"
 	"github.com/alpacahq/alpaca-trade-api-go/v3/marketdata"
@@ -353,6 +354,30 @@ func (t *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols 
 		prices[symbol] = trade.Price
 	}
 
+	return prices, nil
+}
+
+// DailyClosingPrices retrieves the split-adjusted daily closing prices of a symbol.
+func (t *TradingAccount) DailyClosingPrices(ctx context.Context, symbol string, from, to time.Time) ([]investor.DailyPrice, error) {
+	bars, err := t.client.marketDataClient.GetBars(symbol, marketdata.GetBarsRequest{
+		TimeFrame:  marketdata.OneDay,
+		Adjustment: marketdata.Split,
+		Start:      from,
+		End:        to,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get daily bars for %s: %w", symbol, err)
+	}
+
+	prices := make([]investor.DailyPrice, 0, len(bars))
+	for _, bar := range bars {
+		// Alpaca stamps a daily bar with midnight US Eastern time, which falls on the trading day in UTC.
+		day := bar.Timestamp.UTC()
+		prices = append(prices, investor.DailyPrice{
+			Date:  time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC),
+			Close: bar.Close,
+		})
+	}
 	return prices, nil
 }
 

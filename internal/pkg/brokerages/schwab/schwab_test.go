@@ -107,3 +107,34 @@ func TestParseOrderTime(t *testing.T) {
 		assert.False(t, ok, value)
 	}
 }
+
+func TestParsePriceHistory(t *testing.T) {
+	// 1759381200000 is 2025-10-02T05:00:00Z, midnight US Central time.
+	prices, err := parsePriceHistory([]byte(`{
+		"candles": [
+			{"open": 2, "high": 3, "low": 1, "close": 67.26, "volume": 10, "datetime": 1759381200000},
+			{"open": 2, "high": 3, "low": 1, "close": 68.26, "volume": 10, "datetime": 1759294800000}
+		],
+		"symbol": "VYLR",
+		"empty": false
+	}`))
+
+	require.NoError(t, err)
+	assert.Equal(t, []investor.DailyPrice{
+		{Date: time.Date(2025, 10, 1, 0, 0, 0, 0, time.UTC), Close: 68.26},
+		{Date: time.Date(2025, 10, 2, 0, 0, 0, 0, time.UTC), Close: 67.26},
+	}, prices)
+}
+
+func TestParsePriceHistoryUnknownSymbol(t *testing.T) {
+	prices, err := parsePriceHistory([]byte(`{"candles": [], "symbol": "BRK.B", "empty": true}`))
+
+	require.NoError(t, err)
+	assert.Empty(t, prices)
+}
+
+func TestParsePriceHistoryInvalidBody(t *testing.T) {
+	_, err := parsePriceHistory([]byte(`not json`))
+
+	assert.Error(t, err)
+}

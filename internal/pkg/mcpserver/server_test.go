@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,8 +25,13 @@ type fakeAccount struct {
 	priceSymbols  []string
 	recentLimit   int
 	placed        []investor.OrderRequest
-	cancelled     []string
-	err           error
+
+	historyMu      sync.Mutex
+	histories      map[string][]investor.DailyPrice
+	historySymbols []string
+	historyFrom    time.Time
+	cancelled      []string
+	err            error
 }
 
 func (f *fakeAccount) RefreshAccount(ctx context.Context) error {
@@ -37,6 +43,14 @@ func (f *fakeAccount) RefreshAccount(ctx context.Context) error {
 		f.totalCash = *f.brokerageCash
 	}
 	return nil
+}
+
+func (f *fakeAccount) DailyClosingPrices(ctx context.Context, symbol string, from, to time.Time) ([]investor.DailyPrice, error) {
+	f.historyMu.Lock()
+	defer f.historyMu.Unlock()
+	f.historySymbols = append(f.historySymbols, symbol)
+	f.historyFrom = from
+	return f.histories[symbol], f.err
 }
 
 func (f *fakeAccount) LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
@@ -170,6 +184,7 @@ func TestListTools(t *testing.T) {
 		"get_latest_prices":   true,
 		"get_order_status":    true,
 		"get_recent_orders":   true,
+		"backtrack":           true,
 		"place_order":         false,
 		"cancel_order":        false,
 	}, readOnly)
@@ -288,6 +303,7 @@ func TestBrokerageErrorIsToolError(t *testing.T) {
 		{"get_latest_prices", map[string]any{"symbols": []string{"AAPL"}}},
 		{"get_order_status", map[string]any{"order_id": "abc"}},
 		{"get_recent_orders", map[string]any{}},
+		{"backtrack", map[string]any{"slices": []map[string]any{{"symbol": "AAA", "weight": 1}, {"symbol": "BBB", "weight": 1}}}},
 		{"place_order", map[string]any{"symbol": "AAPL", "action": "BUY", "type": "MARKET", "quantity": 1}},
 		{"cancel_order", map[string]any{"order_id": "abc"}},
 	} {
@@ -485,4 +501,154 @@ func TestCancelOrderRequiresOrderID(t *testing.T) {
 
 	assert.Contains(t, errorText(t, result), "order_id is required")
 	assert.Empty(t, account.cancelled)
+}
+
+// yearOfPrices builds a history of weekly prices that starts a year ago with the first
+// price and ends today with the last price.
+func yearOfPrices(first, last float64) []investor.DailyPrice {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	prices := []investor.DailyPrice{{Date: today.AddDate(-1, 0, 0), Close: first}}
+	for week := 51; week >= 1; week-- {
+		prices = append(prices, investor.DailyPrice{Date: today.AddDate(0, 0, -7*week), Close: first})
+	}
+	return append(prices, investor.DailyPrice{Date: today, Close: last})
+}
+
+func backtrackAccount() *fakeAccount {
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	return &fakeAccount{
+		positions: []investor.Position{
+			{Symbol: "AAA", MarketValue: 7500},
+			{Symbol: "BBB", MarketValue: 2500},
+		},
+		histories: map[string][]investor.DailyPrice{
+			"AAA": yearOfPrices(100, 120),
+			"BBB": yearOfPrices(50, 50),
+			"CCC": yearOfPrices(10, 20),
+			// NEW only started trading a week ago.
+			"NEW": {{Date: today.AddDate(0, 0, -7), Close: 10}, {Date: today, Close: 11}},
+		},
+	}
+}
+
+func TestBacktrackCurrentPositions(t *testing.T) {
+	account := backtrackAccount()
+	session := connect(t, account)
+
+	var out BacktrackOutput
+	callTool(t, session, "backtrack", map[string]any{}, &out)
+
+	assert.Equal(t, "current_positions", out.Source)
+	assert.Equal(t, "never", out.Rebalance)
+	assert.Equal(t, 10000.0, out.InitialAmount)
+	// 75% of the amount gains 20%.
+	assert.InDelta(t, 11500, out.FinalAmount, 1e-9)
+	assert.InDelta(t, 15, out.TotalReturnPct, 1e-9)
+	assert.Empty(t, out.Excluded)
+
+	require.Len(t, out.Slices, 2)
+	assert.Equal(t, "AAA", out.Slices[0].Symbol)
+	assert.InDelta(t, 75, out.Slices[0].WeightPct, 1e-9)
+	assert.InDelta(t, 20, out.Slices[0].PriceReturnPct, 1e-9)
+	assert.InDelta(t, 1500, out.Slices[0].Contribution, 1e-9)
+
+	assert.ElementsMatch(t, []string{"AAA", "BBB"}, account.historySymbols)
+	assert.WithinDuration(t, time.Now().AddDate(-1, 0, 0), account.historyFrom, time.Minute)
+}
+
+func TestBacktrackMonthEndValues(t *testing.T) {
+	session := connect(t, backtrackAccount())
+
+	var out BacktrackOutput
+	callTool(t, session, "backtrack", map[string]any{}, &out)
+
+	// A year of weekly prices spans 12 or 13 calendar months, plus the first day.
+	require.GreaterOrEqual(t, len(out.MonthEndValues), 13)
+	require.LessOrEqual(t, len(out.MonthEndValues), 15)
+	assert.Equal(t, out.From, out.MonthEndValues[0].Date)
+	assert.Equal(t, 10000.0, out.MonthEndValues[0].Value)
+	assert.Equal(t, out.To, out.MonthEndValues[len(out.MonthEndValues)-1].Date)
+	assert.InDelta(t, out.FinalAmount, out.MonthEndValues[len(out.MonthEndValues)-1].Value, 1e-9)
+
+	months := map[string]int{}
+	for _, point := range out.MonthEndValues[1:] {
+		months[point.Date[:7]]++
+	}
+	for month, count := range months {
+		// The first day's month may also appear as that month's end.
+		assert.LessOrEqual(t, count, 1, month)
+	}
+}
+
+func TestBacktrackGivenSlices(t *testing.T) {
+	account := backtrackAccount()
+	session := connect(t, account)
+
+	var out BacktrackOutput
+	callTool(t, session, "backtrack", map[string]any{
+		"slices": []map[string]any{
+			{"symbol": " ccc ", "weight": 3},
+			{"symbol": "BBB", "weight": 1},
+			{"symbol": "NEW", "weight": 4},
+		},
+		"years":          1,
+		"rebalance":      "Monthly",
+		"initial_amount": 2000,
+	}, &out)
+
+	assert.Equal(t, "given_slices", out.Source)
+	assert.Equal(t, "monthly", out.Rebalance)
+	assert.Equal(t, 2000.0, out.InitialAmount)
+
+	// NEW has half of the weight but no history, so CCC and BBB keep their 3:1 proportion.
+	require.Len(t, out.Excluded, 1)
+	assert.Equal(t, "NEW", out.Excluded[0].Symbol)
+	assert.InDelta(t, 50, out.Excluded[0].WeightPct, 1e-9)
+
+	require.Len(t, out.Slices, 2)
+	assert.Equal(t, "CCC", out.Slices[0].Symbol)
+	assert.InDelta(t, 75, out.Slices[0].WeightPct, 1e-9)
+	// CCC doubles on the last day: 75% of $2000 becomes $3000.
+	assert.InDelta(t, 3500, out.FinalAmount, 1e-9)
+
+	assert.NotContains(t, account.historySymbols, "AAA", "the account's positions must not be used when slices are given")
+}
+
+func TestBacktrackInvalidInput(t *testing.T) {
+	twoSlices := []map[string]any{{"symbol": "AAA", "weight": 1}, {"symbol": "BBB", "weight": 1}}
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{"years too small", map[string]any{"years": -1}, "years must be between 1 and 20"},
+		{"years too large", map[string]any{"years": 21}, "years must be between 1 and 20"},
+		{"unknown rebalance", map[string]any{"rebalance": "weekly"}, "rebalance must be never, monthly, quarterly or yearly"},
+		{"negative amount", map[string]any{"initial_amount": -5}, "initial_amount must be greater than zero"},
+		{"one slice", map[string]any{"slices": twoSlices[:1]}, "slices must hold at least two symbols"},
+		{"blank symbol", map[string]any{"slices": []map[string]any{{"symbol": " ", "weight": 1}, {"symbol": "BBB", "weight": 1}}}, "every slice needs a symbol"},
+		{"zero weight", map[string]any{"slices": []map[string]any{{"symbol": "AAA", "weight": 0}, {"symbol": "BBB", "weight": 1}}}, "weight for AAA must be greater than zero"},
+		{"duplicate symbol", map[string]any{"slices": []map[string]any{{"symbol": "AAA", "weight": 1}, {"symbol": "aaa", "weight": 1}}}, "symbol AAA is duplicated in the pie"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := backtrackAccount()
+			session := connect(t, account)
+
+			result := callTool(t, session, "backtrack", tt.args, nil)
+
+			assert.Contains(t, errorText(t, result), tt.wantErr)
+			assert.Empty(t, account.historySymbols, "no prices may be requested for invalid input")
+		})
+	}
+}
+
+func TestBacktrackNeedsTwoPositions(t *testing.T) {
+	session := connect(t, &fakeAccount{positions: []investor.Position{{Symbol: "AAA", MarketValue: 100}}})
+
+	result := callTool(t, session, "backtrack", map[string]any{}, nil)
+
+	assert.Contains(t, errorText(t, result), "a pie needs at least two positions")
 }

@@ -121,3 +121,29 @@ func TestValidatePie(t *testing.T) {
 		})
 	}
 }
+
+func TestPieFromPositions(t *testing.T) {
+	pie, err := PieFromPositions([]Position{
+		{Symbol: "AAPL", MarketValue: 7500},
+		{Symbol: "SHORT", MarketValue: -500},
+		{Symbol: "NVDA", MarketValue: 2500},
+		{Symbol: "EMPTY", MarketValue: 0},
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, []Slice{{Symbol: "AAPL", Weight: 75}, {Symbol: "NVDA", Weight: 25}}, pie.Slices)
+
+	_, _, err = pie.ValidatePie()
+	assert.NoError(t, err)
+}
+
+func TestPieFromPositionsNeedsTwoPositions(t *testing.T) {
+	_, err := PieFromPositions(nil)
+	assert.EqualError(t, err, "there are no positions with a market value")
+
+	_, err = PieFromPositions([]Position{{Symbol: "SHORT", MarketValue: -500}})
+	assert.EqualError(t, err, "there are no positions with a market value")
+
+	_, err = PieFromPositions([]Position{{Symbol: "AAPL", MarketValue: 100}})
+	assert.EqualError(t, err, "a pie needs at least two positions")
+}

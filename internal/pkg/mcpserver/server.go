@@ -58,6 +58,15 @@ func New(account investor.TradingAccount) *mcp.Server {
 	}, h.recentOrders)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name: "backtrack",
+		Description: "Simulate how a set of holdings would have performed over the past years, using daily closing prices. " +
+			"Without slices it uses the account's current positions at their current weights; with slices it uses the given symbols and weights, which do not have to be held. " +
+			"The result is price return only: prices are adjusted for stock splits but dividends, fees, taxes and spin-offs are not accounted for. " +
+			"Symbols without price history at the start of the period are left out and listed in excluded.",
+		Annotations: &mcp.ToolAnnotations{Title: "Backtrack", ReadOnlyHint: true},
+	}, h.backtrack)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "place_order",
 		Description: "Place a buy or sell order in the trading account. This submits a real order to the brokerage as soon as it is called, so confirm the symbol, action, quantity and order type with the user first.",
 		Annotations: &mcp.ToolAnnotations{Title: "Place order", DestructiveHint: boolPtr(true)},

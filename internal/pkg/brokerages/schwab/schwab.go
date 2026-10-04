@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asoliman1/money-pies/internal/pkg/investor"
@@ -30,6 +32,7 @@ const (
 	accountsNumbersPath = "/trader/v1/accounts/accountNumbers"
 	ordersPath          = "/trader/v1/accounts/%s/orders"
 	quotesPath          = "/marketdata/v1/quotes"
+	priceHistoryPath    = "/marketdata/v1/pricehistory"
 
 	// recentOrdersLookbackDays is how far back GetRecentOrders looks for orders.
 	recentOrdersLookbackDays = 60
@@ -63,6 +66,8 @@ type Client struct {
 	config      Config
 	restyClient *resty.Client
 	token       *Token
+	// tokenMu guards token so that requests can be made concurrently.
+	tokenMu sync.Mutex
 }
 
 // NewClient creates a new Schwab client
@@ -178,22 +183,35 @@ func (c *Client) IsAuthenticated() bool {
 	return c.token != nil && time.Now().Before(c.token.ExpiresAt)
 }
 
-// makeRequest is a helper function to make authenticated API requests
-func (c *Client) makeRequest(ctx context.Context, method, path string, body any) (*resty.Response, error) {
+// accessToken returns a valid access token, refreshing it first if it is about to expire.
+func (c *Client) accessToken(ctx context.Context) (string, error) {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+
 	// Check if token needs refresh
 	if c.token != nil && time.Now().Add(5*time.Minute).After(c.token.ExpiresAt) {
 		if err := c.refreshToken(ctx); err != nil {
-			return nil, fmt.Errorf("failed to refresh token: %w", err)
+			return "", fmt.Errorf("failed to refresh token: %w", err)
 		}
 	}
 
 	if !c.IsAuthenticated() {
-		return nil, fmt.Errorf("not authenticated")
+		return "", fmt.Errorf("not authenticated")
+	}
+
+	return c.token.AccessToken, nil
+}
+
+// makeRequest is a helper function to make authenticated API requests
+func (c *Client) makeRequest(ctx context.Context, method, path string, body any) (*resty.Response, error) {
+	accessToken, err := c.accessToken(ctx)
+	if err != nil {
+		return nil, err
 	}
 
 	req := c.restyClient.R().
 		SetContext(ctx).
-		SetAuthToken(c.token.AccessToken)
+		SetAuthToken(accessToken)
 
 	if body != nil {
 		req.SetHeader("Content-Type", "application/json").
@@ -201,7 +219,6 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body any)
 	}
 
 	var resp *resty.Response
-	var err error
 
 	switch method {
 	case "GET":
@@ -574,6 +591,56 @@ func (c *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols 
 		prices[symbol] = quote.Regular.RegularMarketLastPrice
 	}
 
+	return prices, nil
+}
+
+// DailyClosingPrices retrieves the split-adjusted daily closing prices of a symbol.
+// Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Market%20Data%20Production
+// Endpoint: GET /marketdata/v1/pricehistory
+func (c *TradingAccount) DailyClosingPrices(ctx context.Context, symbol string, from, to time.Time) ([]investor.DailyPrice, error) {
+	query := url.Values{}
+	query.Set("symbol", symbol)
+	query.Set("periodType", "year")
+	query.Set("frequencyType", "daily")
+	query.Set("frequency", "1")
+	query.Set("startDate", fmt.Sprintf("%d", from.UnixMilli()))
+	query.Set("endDate", fmt.Sprintf("%d", to.UnixMilli()))
+	query.Set("needExtendedHoursData", "false")
+
+	resp, err := c.client.makeRequest(ctx, "GET", priceHistoryPath+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get price history for %s failed with status %d: %s", symbol, resp.StatusCode(), string(resp.Body()))
+	}
+
+	return parsePriceHistory(resp.Body())
+}
+
+// parsePriceHistory converts Schwab's price history response to daily prices, oldest first.
+func parsePriceHistory(body []byte) ([]investor.DailyPrice, error) {
+	var history struct {
+		Candles []struct {
+			Close    float64 `json:"close"`
+			Datetime int64   `json:"datetime"` // start of the trading day in milliseconds since epoch
+		} `json:"candles"`
+	}
+	if err := json.Unmarshal(body, &history); err != nil {
+		return nil, fmt.Errorf("failed to parse price history response: %w", err)
+	}
+
+	prices := make([]investor.DailyPrice, 0, len(history.Candles))
+	for _, candle := range history.Candles {
+		// Schwab stamps a daily candle with midnight US Central time, which falls on the trading day in UTC.
+		day := time.UnixMilli(candle.Datetime).UTC()
+		prices = append(prices, investor.DailyPrice{
+			Date:  time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.UTC),
+			Close: candle.Close,
+		})
+	}
+	sort.Slice(prices, func(i, j int) bool { return prices[i].Date.Before(prices[j].Date) })
 	return prices, nil
 }
 

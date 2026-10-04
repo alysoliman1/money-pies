@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Account viewer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="viz-root">
+    <header class="page-header">
+      <div>
+        <h1>Account</h1>
+        <p class="meta" id="meta">Loading…</p>
+      </div>
+      <div class="header-actions">
+        <span class="badge" title="This page cannot place or cancel orders">Read-only</span>
+        <button type="button" id="refresh">Refresh</button>
+      </div>
+    </header>
+
+    <p class="banner" id="error" role="alert" hidden></p>
+
+    <main id="content" hidden>
+      <section class="figures" aria-label="Balances">
+        <div class="hero">
+          <p class="label">Account value</p>
+          <p class="hero-value" id="account-value"></p>
+          <p class="note">Positions plus cash</p>
+        </div>
+        <div class="tiles" id="tiles"></div>
+      </section>
+
+      <section class="charts">
+        <article class="card">
+          <h2>Largest positions</h2>
+          <p class="subtitle" id="largest-subtitle"></p>
+          <div class="bars" id="largest"></div>
+        </article>
+        <article class="card">
+          <h2>Biggest unrealized gains and losses</h2>
+          <p class="subtitle" id="pl-subtitle"></p>
+          <ul class="legend" aria-label="Legend">
+            <li><span class="swatch swatch-loss"></span>Loss</li>
+            <li><span class="swatch swatch-gain"></span>Gain</li>
+          </ul>
+          <div class="bars" id="pl"></div>
+        </article>
+      </section>
+
+      <section class="card" id="backtrack">
+        <h2>Backtrack</h2>
+        <p class="subtitle">What $10,000 would have become if it had been held in today's positions, at today's weights, from the start of the period. Price changes only: dividends, fees and taxes are left out. Prices are adjusted for stock splits but not for spin-offs, so a company that spun off part of itself shows a drop it did not really have.</p>
+        <form class="controls" id="backtrack-form">
+          <label>Period
+            <select name="years">
+              <option value="1">1 year</option>
+              <option value="3">3 years</option>
+              <option value="5">5 years</option>
+            </select>
+          </label>
+          <label>Rebalance to the weights
+            <select name="rebalance">
+              <option value="never">Never</option>
+              <option value="monthly">Monthly</option>
+              <option value="quarterly">Quarterly</option>
+              <option value="yearly">Yearly</option>
+            </select>
+          </label>
+          <button type="submit" id="backtrack-run">Run backtrack</button>
+          <span class="note" id="backtrack-status" role="status"></span>
+        </form>
+        <p class="banner" id="backtrack-error" role="alert" hidden></p>
+
+        <div id="backtrack-result" hidden>
+          <div class="tiles backtrack-tiles" id="backtrack-tiles"></div>
+
+          <h3 id="backtrack-chart-title"></h3>
+          <div class="line-chart" id="backtrack-chart"></div>
+          <details>
+            <summary>Show the values as a table</summary>
+            <div class="table-scroll">
+              <table id="backtrack-values">
+                <thead><tr><th scope="col">Month end</th><th scope="col" class="num">Value</th><th scope="col" class="num">Change from start</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+
+          <p class="note" id="backtrack-excluded"></p>
+
+          <h3>How each position did</h3>
+          <p class="subtitle">Largest contribution to the result first</p>
+          <div class="table-scroll">
+            <table id="backtrack-slices">
+              <thead>
+                <tr>
+                  <th scope="col">Symbol</th>
+                  <th scope="col" class="num">Weight used</th>
+                  <th scope="col" class="num">Start price</th>
+                  <th scope="col" class="num">End price</th>
+                  <th scope="col" class="num">Price change</th>
+                  <th scope="col" class="num">Added to the $10,000</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Positions</h2>
+        <p class="subtitle" id="positions-subtitle"></p>
+        <div class="table-scroll">
+          <table id="positions">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Recent orders</h2>
+        <p class="subtitle" id="orders-subtitle"></p>
+        <div class="table-scroll">
+          <table id="orders">
+            <thead>
+              <tr>
+                <th scope="col">Submitted</th>
+                <th scope="col">Symbol</th>
+                <th scope="col">Action</th>
+                <th scope="col">Type</th>
+                <th scope="col" class="num">Shares</th>
+                <th scope="col">Status</th>
+                <th scope="col" class="num">Filled</th>
+                <th scope="col" class="num">Fill price</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <div class="tooltip" id="tooltip" role="status" hidden></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

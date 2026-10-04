@@ -7,6 +7,7 @@ It provides the following methods.
 |--------|-------------|
 | `RefreshAccount(ctx)` | Reloads the account's type and balances from the brokerage. The balance and type methods return the values loaded by the last refresh. |
 | `LatestRegularMarketPrices(ctx, symbols)` | Retrieves the latest regular market prices for the given symbols. |
+| `DailyClosingPrices(ctx, symbol, from, to)` | Retrieves the split-adjusted closing price of the symbol for every trading day in the range, oldest first. |
 | `TotalCash(ctx)` | Retrieves the total cash amount in the trading account. |
 | `CashAvailableForTrading(ctx)` | Retrieves the cash available for trading in the trading account. |
 | `CashAvailableForWithdrawal(ctx)` | Retrieves the cash available for withdrawal in the trading account. |

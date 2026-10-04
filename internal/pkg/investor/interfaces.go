@@ -15,6 +15,11 @@ type ReadOnlyTradingAccount interface {
 	// LatestRegularMarketPrices retrieves the latest regular market prices for the given symbols.
 	LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error)
 
+	// DailyClosingPrices retrieves the closing price of the symbol for every trading day
+	// between from and to (both inclusive), oldest first. The prices are adjusted for stock
+	// splits. A symbol without any price in the range yields no prices and no error.
+	DailyClosingPrices(ctx context.Context, symbol string, from, to time.Time) ([]DailyPrice, error)
+
 	// TotalCash retrieves the total cash amount in the trading account.
 	TotalCash(ctx context.Context) (float64, error)
 
@@ -55,6 +60,13 @@ type TradingAccount interface {
 
 	// CancelPendingOrder cancels a pending order.
 	CancelPendingOrder(ctx context.Context, orderID string) error
+}
+
+// DailyPrice is the closing price of a security on one trading day.
+type DailyPrice struct {
+	// Date is the trading day at midnight UTC.
+	Date  time.Time
+	Close float64
 }
 
 // TradeOrder represents a trade order
