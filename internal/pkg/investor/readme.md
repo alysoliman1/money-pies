@@ -34,3 +34,12 @@ We're given a set of $n$ symbols and each symbol has price $c_i$ and weight $w_i
 #### Implementation
 For each symbol, we need to invest $\max(Iw_i-p_i,0)$ but since we can't have fractional shares the amount actually needed would be
 $\lfloor\max(Iw_i-p_i,0)/c_i\rfloor c_i$. Hence, if we invest $x_i$ in each symbol then the vector $x=(x_1,\ldots,x_n)$ needs to satisfy the constraints $x_i\geq \lfloor\max(Iw_i-p_i,0)/c_i\rfloor c_i$ and $\sum_ix_i\leq I$. The problem is then to maximize $\sum_ix_i$ under these constraints, which is a very simple linear program.
+
+
+Since shares are whole, each $x_i$ must also be a multiple of $c_i$, so the implementation works in two steps:
+1. Buy the minimum $\lfloor\max(Iw_i-p_i,0)/c_i\rfloor$ shares of each symbol.
+2. Spend what is left of $I$ one share at a time. Each time, among the symbols whose share price still fits in the remaining amount, buy the one that ends up the least above its target $Iw_i$ (ties go to the symbol that appears first in the pie). Stop when no share fits.
+
+The amount left uninvested is therefore always less than the cheapest share price. Step 2 is greedy: it favors staying close to the weights over finding the combination of shares that leaves the absolute smallest remainder.
+
+All orders are market buy orders. Nothing is ordered if the amount, the pie, the pre-invested amounts or the prices are invalid, or if the amount exceeds the cash available for trading. If the brokerage rejects an order, the remaining orders are still placed and the failures are returned together.

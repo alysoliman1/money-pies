@@ -19,3 +19,31 @@ The **client-token.json** stores the access token retrieved at the end of an OAu
 ## Authenticating
 
 Go to `./cmd/schwab-oauth` and run `sh run.sh`.
+
+## MCP Server
+
+`./cmd/mcp-server` serves a brokerage's trading account over the
+[Model Context Protocol](https://modelcontextprotocol.io) (stdio transport).
+The tools are defined in `./internal/pkg/mcpserver` and wrap the read-only part of the
+`TradingAccount` interface: the server cannot place or cancel orders. Every tool call
+loads the account from the brokerage again, so results are never served from a cache.
+
+| Tool | TradingAccount methods |
+|------|------------------------|
+| `get_account_summary` | `Type`, `TotalCash`, `CashAvailableForTrading`, `CashAvailableForWithdrawal`, `LongMarketValue`, `ShortMarketValue`, `PendingDeposits` |
+| `get_positions` | `Positions` |
+| `get_latest_prices` | `LatestRegularMarketPrices` |
+| `get_order_status` | `GetOrderStatus` |
+| `get_recent_orders` | `GetRecentOrders` |
+
+Environment variables:
+
+- `BROKERAGE`: `schwab` or `alpaca` (required)
+- `MONEY_PIES_CONFIG`: config directory (defaults to `$HOME/.money-pies`)
+- `SCHWAB_ACCOUNT_NUMBER`: account number to read (required for schwab)
+
+Example registration with Claude Code:
+```bash
+go build -o bin/mcp-server ./cmd/mcp-server
+claude mcp add money-pies -e BROKERAGE=schwab -e SCHWAB_ACCOUNT_NUMBER=<account-number> -- $PWD/bin/mcp-server
+```

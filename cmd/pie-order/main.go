@@ -14,7 +14,13 @@ import (
 )
 
 func main() {
-	tradingAccount, err := getTradingAccount()
+	brokerageName := os.Getenv("BROKERAGE")
+	if brokerageName == "" {
+		fmt.Println("brokerage name not specified")
+		return
+	}
+
+	tradingAccount, err := getTradingAccount(brokerageName)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -26,10 +32,37 @@ func main() {
 		return
 	}
 
+	pie, err := getPie(pieLocation)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	ctx := context.Background()
+	preInvestedAmounts := map[string]float64{
+		"FICO": 1500,
+		"AZO":  1500,
+	}
+	investmentAmount := 150000.0
+
+	i := investor.NewInvestor(tradingAccount)
+	if err := i.PlacePieOrderWithoutFractionalShares(
+		ctx,
+		investmentAmount,
+		pie,
+		preInvestedAmounts,
+	); err != nil {
+		fmt.Println("failed to place pie order:", err)
+		return
+	}
+
+	fmt.Println("pie order placed successfully")
+}
+
+func getPie(pieLocation string) (investor.Pie, error) {
 	file, err := os.Open(pieLocation)
 	if err != nil {
-		fmt.Println("failed to open pie file:", err)
-		return
+		return investor.Pie{}, fmt.Errorf("failed to open pie file: %v", err)
 	}
 	defer file.Close()
 
@@ -38,8 +71,7 @@ func main() {
 	// Read all records at once
 	records, err := reader.ReadAll()
 	if err != nil {
-		fmt.Println("failed to read pie file:", err)
-		return
+		return investor.Pie{}, fmt.Errorf("failed to read pie file: %v", err)
 	}
 
 	// Print the records
@@ -47,8 +79,7 @@ func main() {
 	for _, record := range records[1:] {
 		weight, err := strconv.ParseFloat(record[1], 64)
 		if err != nil {
-			fmt.Println("failed to parse weight:", err)
-			return
+			return investor.Pie{}, fmt.Errorf("failed to parse weight: %v", err)
 		}
 		slices = append(slices, investor.Slice{
 			Weight: weight,
@@ -56,27 +87,15 @@ func main() {
 		})
 	}
 
-	ctx := context.Background()
-	preInvestedAmounts := map[string]float64{
-		"FICO": 1500,
-		"AZO":  1500,
-	}
-
-	i := investor.NewInvestor(tradingAccount)
-	i.PlacePieOrder(ctx, 150000, investor.Pie{
+	return investor.Pie{
 		Slices: slices,
-	}, preInvestedAmounts, false)
+	}, nil
 }
 
-func getTradingAccount() (investor.TradingAccount, error) {
+func getTradingAccount(brokerageName string) (investor.TradingAccount, error) {
 	configDir := os.Getenv("MONEY_PIES_CONFIG")
 	if configDir == "" {
 		return nil, errors.New("config directory not specified")
-	}
-
-	brokerageName := os.Getenv("BROKERAGE")
-	if brokerageName == "" {
-		return nil, errors.New("brokerage name not specified")
 	}
 
 	clientConfigName := fmt.Sprintf("%s/%s/client-config.json", configDir, brokerageName)

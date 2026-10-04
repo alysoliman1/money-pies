@@ -47,11 +47,7 @@ func (p *Pie) ValidatePie() (map[string]float64, []string, error) {
 	if math.Round(totalWeight) != 100 {
 		return nil, nil, fmt.Errorf("total weight is not 100")
 	}
-	pieSymbols := []string{}
-	for symbol := range symbolToWeightMap {
-		pieSymbols = append(pieSymbols, symbol)
-	}
-	return symbolToWeightMap, pieSymbols, nil
+	return symbolToWeightMap, p.GetSymbols(), nil
 }
 
 // GetSymbols returns all the symbols appearing in the pie.
