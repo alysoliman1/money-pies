@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -29,6 +30,13 @@ const (
 	accountsNumbersPath = "/trader/v1/accounts/accountNumbers"
 	ordersPath          = "/trader/v1/accounts/%s/orders"
 	quotesPath          = "/marketdata/v1/quotes"
+
+	// recentOrdersLookbackDays is how far back GetRecentOrders looks for orders.
+	recentOrdersLookbackDays = 60
+	// orderTimeFormat is the timestamp format Schwab expects for order time ranges.
+	orderTimeFormat = "2006-01-02T15:04:05.000Z"
+	// orderResponseTimeFormat is the timestamp format in Schwab's order responses.
+	orderResponseTimeFormat = "2006-01-02T15:04:05-0700"
 )
 
 // Config holds Schwab API configuration
@@ -478,48 +486,14 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 		return nil, fmt.Errorf("get order failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
-	var schwabOrder struct {
-		OrderID            int64   `json:"orderId"`
-		Status             string  `json:"status"`
-		Quantity           float64 `json:"quantity"`
-		FilledQuantity     float64 `json:"filledQuantity"`
-		Price              float64 `json:"price"`
-		OrderType          string  `json:"orderType"`
-		EnteredTime        string  `json:"enteredTime"`
-		OrderLegCollection []struct {
-			Instruction string `json:"instruction"`
-			Instrument  struct {
-				Symbol string `json:"symbol"`
-			} `json:"instrument"`
-		} `json:"orderLegCollection"`
-	}
-
-	if err := json.Unmarshal(resp.Body(), &schwabOrder); err != nil {
+	var order schwabOrder
+	if err := json.Unmarshal(resp.Body(), &order); err != nil {
 		return nil, fmt.Errorf("failed to parse order response: %w", err)
 	}
 
-	order := &investor.TradeOrder{
-		ID:          fmt.Sprintf("%d", schwabOrder.OrderID),
-		Status:      convertOrderStatus(schwabOrder.Status),
-		Quantity:    schwabOrder.Quantity,
-		FilledQty:   schwabOrder.FilledQuantity,
-		FilledPrice: schwabOrder.Price,
-		Type:        investor.OrderType(schwabOrder.OrderType),
-		RawResponse: string(resp.Body()),
-	}
-
-	if len(schwabOrder.OrderLegCollection) > 0 {
-		order.Symbol = schwabOrder.OrderLegCollection[0].Instrument.Symbol
-		order.Action = investor.OrderAction(schwabOrder.OrderLegCollection[0].Instruction)
-	}
-
-	if schwabOrder.EnteredTime != "" {
-		if t, err := time.Parse(time.RFC3339, schwabOrder.EnteredTime); err == nil {
-			order.SubmittedAt = t
-		}
-	}
-
-	return order, nil
+	tradeOrder := order.toTradeOrder()
+	tradeOrder.RawResponse = string(resp.Body())
+	return &tradeOrder, nil
 }
 
 // CancelOrder cancels a pending order
@@ -543,7 +517,14 @@ func (c *TradingAccount) CancelPendingOrder(ctx context.Context, orderID string)
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
 // Endpoint: GET /trader/v1/accounts/{accountId}/orders
 func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]investor.TradeOrder, error) {
-	path := fmt.Sprintf("%s/%s/orders?maxResults=%d", accountsPath, c.hashValue, limit)
+	// Schwab requires the time range the orders were entered in.
+	to := time.Now().UTC()
+	from := to.AddDate(0, 0, -recentOrdersLookbackDays)
+	query := url.Values{}
+	query.Set("maxResults", fmt.Sprintf("%d", limit))
+	query.Set("fromEnteredTime", from.Format(orderTimeFormat))
+	query.Set("toEnteredTime", to.Format(orderTimeFormat))
+	path := fmt.Sprintf("%s/%s/orders?%s", accountsPath, c.hashValue, query.Encode())
 	resp, err := c.client.makeRequest(ctx, "GET", path, nil)
 	if err != nil {
 		return nil, err
@@ -553,49 +534,14 @@ func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]inve
 		return nil, fmt.Errorf("get orders failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
-	var schwabOrders []struct {
-		OrderID            int64   `json:"orderId"`
-		Status             string  `json:"status"`
-		Quantity           float64 `json:"quantity"`
-		FilledQuantity     float64 `json:"filledQuantity"`
-		Price              float64 `json:"price"`
-		OrderType          string  `json:"orderType"`
-		EnteredTime        string  `json:"enteredTime"`
-		OrderLegCollection []struct {
-			Instruction string `json:"instruction"`
-			Instrument  struct {
-				Symbol string `json:"symbol"`
-			} `json:"instrument"`
-		} `json:"orderLegCollection"`
-	}
-
+	var schwabOrders []schwabOrder
 	if err := json.Unmarshal(resp.Body(), &schwabOrders); err != nil {
 		return nil, fmt.Errorf("failed to parse orders response: %w", err)
 	}
 
 	orders := make([]investor.TradeOrder, 0, len(schwabOrders))
 	for _, so := range schwabOrders {
-		order := investor.TradeOrder{
-			ID:          fmt.Sprintf("%d", so.OrderID),
-			Status:      convertOrderStatus(so.Status),
-			Quantity:    so.Quantity,
-			FilledQty:   so.FilledQuantity,
-			FilledPrice: so.Price,
-			Type:        investor.OrderType(so.OrderType),
-		}
-
-		if len(so.OrderLegCollection) > 0 {
-			order.Symbol = so.OrderLegCollection[0].Instrument.Symbol
-			order.Action = investor.OrderAction(so.OrderLegCollection[0].Instruction)
-		}
-
-		if so.EnteredTime != "" {
-			if t, err := time.Parse(time.RFC3339, so.EnteredTime); err == nil {
-				order.SubmittedAt = t
-			}
-		}
-
-		orders = append(orders, order)
+		orders = append(orders, so.toTradeOrder())
 	}
 
 	return orders, nil
@@ -629,6 +575,98 @@ func (c *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols 
 	}
 
 	return prices, nil
+}
+
+// schwabOrder is the part of Schwab's order response that we use.
+type schwabOrder struct {
+	OrderID            int64   `json:"orderId"`
+	Status             string  `json:"status"`
+	Quantity           float64 `json:"quantity"`
+	FilledQuantity     float64 `json:"filledQuantity"`
+	Price              float64 `json:"price"` // limit price, absent for market orders
+	OrderType          string  `json:"orderType"`
+	EnteredTime        string  `json:"enteredTime"`
+	CloseTime          string  `json:"closeTime"`
+	OrderLegCollection []struct {
+		Instruction string `json:"instruction"`
+		Instrument  struct {
+			Symbol string `json:"symbol"`
+		} `json:"instrument"`
+	} `json:"orderLegCollection"`
+	OrderActivityCollection []struct {
+		ActivityType  string `json:"activityType"`
+		ExecutionLegs []struct {
+			Quantity float64 `json:"quantity"`
+			Price    float64 `json:"price"`
+		} `json:"executionLegs"`
+	} `json:"orderActivityCollection"`
+}
+
+func (o schwabOrder) toTradeOrder() investor.TradeOrder {
+	order := investor.TradeOrder{
+		ID:          fmt.Sprintf("%d", o.OrderID),
+		Status:      convertOrderStatus(o.Status),
+		Quantity:    o.Quantity,
+		FilledQty:   o.FilledQuantity,
+		FilledPrice: o.averageFillPrice(),
+		Type:        investor.OrderType(o.OrderType),
+	}
+
+	if order.Type == investor.OrderTypeLimit && o.Price > 0 {
+		limitPrice := o.Price
+		order.LimitPrice = &limitPrice
+	}
+
+	if len(o.OrderLegCollection) > 0 {
+		order.Symbol = o.OrderLegCollection[0].Instrument.Symbol
+		order.Action = investor.OrderAction(o.OrderLegCollection[0].Instruction)
+	}
+
+	if t, ok := parseOrderTime(o.EnteredTime); ok {
+		order.SubmittedAt = t
+	}
+
+	// Schwab also sets closeTime on cancelled and rejected orders.
+	if order.Status == investor.OrderStatusFilled {
+		if t, ok := parseOrderTime(o.CloseTime); ok {
+			order.FilledAt = &t
+		}
+	}
+
+	return order
+}
+
+// averageFillPrice returns the quantity-weighted average price of the order's executions,
+// or 0 if nothing was executed. An order can be filled in several executions at different prices.
+func (o schwabOrder) averageFillPrice() float64 {
+	filledQuantity, filledValue := 0.0, 0.0
+	for _, activity := range o.OrderActivityCollection {
+		if activity.ActivityType != "EXECUTION" {
+			continue
+		}
+		for _, leg := range activity.ExecutionLegs {
+			filledQuantity += leg.Quantity
+			filledValue += leg.Quantity * leg.Price
+		}
+	}
+	if filledQuantity == 0 {
+		return 0
+	}
+	// Round away floating point noise; Schwab prices have at most four decimals.
+	return math.Round(filledValue/filledQuantity*1e4) / 1e4
+}
+
+// parseOrderTime parses the timestamps in Schwab's order responses, e.g. 2026-09-02T17:21:58+0000.
+func parseOrderTime(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{orderResponseTimeFormat, time.RFC3339} {
+		if t, err := time.Parse(layout, value); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // convertOrderStatus converts Schwab order status to our standard status

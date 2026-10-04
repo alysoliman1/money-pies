@@ -59,7 +59,7 @@ Create a file at `~/.money-pies/alpaca/client-config.json` with the following st
 Use the verification script to test your Alpaca credentials:
 
 ```bash
-ALPACA_CLIENT_CONFIG=~/.money-pies/alpaca/client-config.json go run cmd/alpaca-verify/main.go
+ALPACA_CLIENT_CONFIG=~/.money-pies/alpaca/client-config.json go run apps/alpaca-verify/main.go
 ```
 
 Expected output:

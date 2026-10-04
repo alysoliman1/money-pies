@@ -27,7 +27,7 @@ import (
 //   SCHWAB_ACCOUNT_NUMBER account number to trade with (required for schwab)
 //
 // The brokerage's config is read from $MONEY_PIES_CONFIG/$BROKERAGE/client-config.json.
-// For schwab, authenticate first with ./cmd/schwab-oauth.
+// For schwab, authenticate first with ./apps/schwab-oauth.
 
 const schwabTimeoutInSeconds = 30
 
