@@ -3,47 +3,37 @@ package main
 import (
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 
-	"github.com/asoliman1/money-pies/internal/pkg/brokerages/schwab"
+	"github.com/asoliman1/money-pies/internal/pkg/brokerages"
 	"github.com/asoliman1/money-pies/internal/pkg/investor"
 )
 
 func main() {
-	brokerageName := os.Getenv("BROKERAGE")
-	if brokerageName == "" {
-		fmt.Println("brokerage name not specified")
-		return
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	tradingAccount, err := getTradingAccount(brokerageName)
+	tradingAccount, err := brokerages.NewTradingAccountFromEnv(ctx)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("failed to create trading account:", err)
 		return
 	}
 
-	pieLocation := os.Getenv("PIE_LOCATION")
-	if pieLocation == "" {
-		fmt.Println("PIE_LOCATION not specified")
-		return
-	}
-
-	pie, err := getPie(pieLocation)
+	pie, err := getPieFromEnv()
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("failed to get pie:", err)
 		return
 	}
 
-	ctx := context.Background()
+	investmentAmount := 1.0
 	preInvestedAmounts := map[string]float64{
-		"FICO": 1500,
-		"AZO":  1500,
+		// "AAA": 1,
 	}
-	investmentAmount := 150000.0
 
 	i := investor.NewInvestor(tradingAccount)
 	if err := i.PlacePieOrderWithoutFractionalShares(
@@ -59,7 +49,12 @@ func main() {
 	fmt.Println("pie order placed successfully")
 }
 
-func getPie(pieLocation string) (investor.Pie, error) {
+func getPieFromEnv() (investor.Pie, error) {
+	pieLocation := os.Getenv("PIE_LOCATION")
+	if pieLocation == "" {
+		return investor.Pie{}, errors.New("PIE_LOCATION not specified")
+	}
+
 	file, err := os.Open(pieLocation)
 	if err != nil {
 		return investor.Pie{}, fmt.Errorf("failed to open pie file: %v", err)
@@ -90,36 +85,4 @@ func getPie(pieLocation string) (investor.Pie, error) {
 	return investor.Pie{
 		Slices: slices,
 	}, nil
-}
-
-func getTradingAccount(brokerageName string) (investor.TradingAccount, error) {
-	configDir := os.Getenv("MONEY_PIES_CONFIG")
-	if configDir == "" {
-		return nil, errors.New("config directory not specified")
-	}
-
-	clientConfigName := fmt.Sprintf("%s/%s/client-config.json", configDir, brokerageName)
-	rawClientConfig, err := os.ReadFile(clientConfigName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %v", err)
-	}
-
-	var clientConfig schwab.Config
-	if err := json.Unmarshal(rawClientConfig, &clientConfig); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
-	}
-
-	accountNumber := "30650409"
-
-	timeoutInSeconds := 30
-	client := schwab.
-		NewClient(clientConfig, timeoutInSeconds).
-		GetAccessTokenFromFile()
-
-	tradingAccount, err := schwab.NewTradingAccount(context.Background(), client, accountNumber)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create trading account: %v", err)
-	}
-
-	return tradingAccount, nil
 }
