@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// TradingAccount is the interface that all trading accounts must satisfy.
+// TradingAccount is the interface that all trading account integrations must implement.
 type TradingAccount interface {
 	// LatestRegularMarketPrices retrieves the latest regular market prices for the given symbols.
 	LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error)

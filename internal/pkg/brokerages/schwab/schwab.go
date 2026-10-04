@@ -2,10 +2,8 @@ package schwab
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -13,6 +11,7 @@ import (
 	"time"
 
 	"github.com/asoliman1/money-pies/internal/pkg/investor"
+	"github.com/go-resty/resty/v2"
 )
 
 // Schwab API Documentation Links:
@@ -53,19 +52,20 @@ type Token struct {
 
 // Client implements the brokerage.BrokerageClient interface for Schwab
 type Client struct {
-	config     Config
-	httpClient *http.Client
-	token      *Token
+	config      Config
+	restyClient *resty.Client
+	token       *Token
 }
 
 // NewClient creates a new Schwab client
 // Documentation: https://developer.schwab.com/products/trader-api--individual/details/documentation/Retail%20Trader%20API%20Production
 func NewClient(config Config, timeoutInSeconds int) *Client {
+	client := resty.New().
+		SetTimeout(time.Duration(timeoutInSeconds) * time.Second)
+
 	return &Client{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		config:      config,
+		restyClient: client,
 	}
 }
 
@@ -105,39 +105,25 @@ func (c *Client) GetAccessTokenFromFile() *Client {
 
 // exchangeCodeForToken exchanges the authorization code for access and refresh tokens
 func (c *Client) ExchangeAuthCodeForAccessToken(ctx context.Context, code string) error {
-	data := url.Values{}
-	data.Set("grant_type", "authorization_code")
-	data.Set("code", code)
-	data.Set("redirect_uri", c.config.RedirectURI)
+	var token Token
+	resp, err := c.restyClient.R().
+		SetContext(ctx).
+		SetBasicAuth(c.config.ClientID, c.config.ClientSecret).
+		SetHeader("Content-Type", "application/x-www-form-urlencoded").
+		SetFormData(map[string]string{
+			"grant_type":   "authorization_code",
+			"code":         code,
+			"redirect_uri": c.config.RedirectURI,
+		}).
+		SetResult(&token).
+		Post(tokenURL)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return fmt.Errorf("failed to create token request: %w", err)
-	}
-
-	credentials := fmt.Sprintf("%s:%s", c.config.ClientID, c.config.ClientSecret)
-	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(credentials))
-	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", encodedCredentials))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to exchange code for token: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read token response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var token Token
-	if err := json.Unmarshal(body, &token); err != nil {
-		return fmt.Errorf("failed to parse token response: %w", err)
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("token request failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
@@ -153,37 +139,24 @@ func (c *Client) refreshToken(ctx context.Context) error {
 		return fmt.Errorf("no refresh token available")
 	}
 
-	data := url.Values{}
-	data.Set("grant_type", "refresh_token")
-	data.Set("refresh_token", c.token.RefreshToken)
+	var token Token
+	resp, err := c.restyClient.R().
+		SetContext(ctx).
+		SetBasicAuth(c.config.ClientID, c.config.ClientSecret).
+		SetHeader("Content-Type", "application/x-www-form-urlencoded").
+		SetFormData(map[string]string{
+			"grant_type":    "refresh_token",
+			"refresh_token": c.token.RefreshToken,
+		}).
+		SetResult(&token).
+		Post(tokenURL)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", tokenURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return fmt.Errorf("failed to create refresh token request: %w", err)
-	}
-
-	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%s:%s", c.config.ClientID, c.config.ClientSecret)))
-	req.Header.Set("Authorization", fmt.Sprintf("Basic %s", encodedCredentials))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to refresh token: %w", err)
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read refresh token response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("refresh token request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var token Token
-	if err := json.Unmarshal(body, &token); err != nil {
-		return fmt.Errorf("failed to parse refresh token response: %w", err)
+	if resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf("refresh token request failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	token.ExpiresAt = time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
@@ -198,7 +171,7 @@ func (c *Client) IsAuthenticated() bool {
 }
 
 // makeRequest is a helper function to make authenticated API requests
-func (c *Client) makeRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+func (c *Client) makeRequest(ctx context.Context, method, path string, body any) (*resty.Response, error) {
 	// Check if token needs refresh
 	if c.token != nil && time.Now().Add(5*time.Minute).After(c.token.ExpiresAt) {
 		if err := c.refreshToken(ctx); err != nil {
@@ -210,18 +183,29 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, body io.R
 		return nil, fmt.Errorf("not authenticated")
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	req := c.restyClient.R().
+		SetContext(ctx).
+		SetAuthToken(c.token.AccessToken)
+
+	if body != nil {
+		req.SetHeader("Content-Type", "application/json").
+			SetBody(body)
 	}
 
-	if method == "POST" {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	//req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.token.AccessToken)
+	var resp *resty.Response
+	var err error
 
-	resp, err := c.httpClient.Do(req)
+	switch method {
+	case "GET":
+		resp, err = req.Get(baseURL + path)
+	case "POST":
+		resp, err = req.Post(baseURL + path)
+	case "DELETE":
+		resp, err = req.Delete(baseURL + path)
+	default:
+		return nil, fmt.Errorf("unsupported HTTP method: %s", method)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -248,15 +232,9 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read accounts response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var schwabAccountsNumbers []struct {
@@ -264,7 +242,7 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 		HashValue     string `json:"hashValue"`
 	}
 
-	if err := json.Unmarshal(body, &schwabAccountsNumbers); err != nil {
+	if err := json.Unmarshal(resp.Body(), &schwabAccountsNumbers); err != nil {
 		return nil, fmt.Errorf("failed to parse accounts response: %w", err)
 	}
 
@@ -274,15 +252,9 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 			if err != nil {
 				return nil, err
 			}
-			defer resp.Body.Close()
 
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return nil, fmt.Errorf("failed to read accounts response: %w", err)
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode, string(body))
+			if resp.StatusCode() != http.StatusOK {
+				return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 			}
 
 			var schwabAccount struct {
@@ -298,7 +270,7 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 					} `json:"currentBalances"`
 				} `json:"securitiesAccount"`
 			}
-			if err := json.Unmarshal(body, &schwabAccount); err != nil {
+			if err := json.Unmarshal(resp.Body(), &schwabAccount); err != nil {
 				return nil, fmt.Errorf("failed to parse account response: %w", err)
 			}
 
@@ -356,15 +328,9 @@ func (c *TradingAccount) Positions(ctx context.Context) ([]investor.Position, er
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read positions response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get positions failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get positions failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var accountData struct {
@@ -382,7 +348,7 @@ func (c *TradingAccount) Positions(ctx context.Context) ([]investor.Position, er
 		} `json:"securitiesAccount"`
 	}
 
-	if err := json.Unmarshal(body, &accountData); err != nil {
+	if err := json.Unmarshal(resp.Body(), &accountData); err != nil {
 		return nil, fmt.Errorf("failed to parse positions response: %w", err)
 	}
 
@@ -441,30 +407,19 @@ func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderReq
 		schwabOrder["price"] = *order.LimitPrice
 	}
 
-	orderJSON, err := json.Marshal(schwabOrder)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal order: %w", err)
-	}
-
 	path := fmt.Sprintf(ordersPath, c.hashValue)
-	resp, err := c.client.makeRequest(ctx, "POST", path, strings.NewReader(string(orderJSON)))
+	resp, err := c.client.makeRequest(ctx, "POST", path, schwabOrder)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read order response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("place order failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusCreated && resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("place order failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	// Extract order ID from Location header
 	orderID := ""
-	if location := resp.Header.Get("Location"); location != "" {
+	if location := resp.Header().Get("Location"); location != "" {
 		parts := strings.Split(location, "/")
 		if len(parts) > 0 {
 			orderID = parts[len(parts)-1]
@@ -480,7 +435,7 @@ func (c *TradingAccount) PlaceOrder(ctx context.Context, order investor.OrderReq
 		LimitPrice:  order.LimitPrice,
 		Status:      investor.OrderStatusPending,
 		SubmittedAt: time.Now(),
-		RawResponse: string(body),
+		RawResponse: string(resp.Body()),
 	}, nil
 }
 
@@ -493,15 +448,9 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read order response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get order failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get order failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var schwabOrder struct {
@@ -520,7 +469,7 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 		} `json:"orderLegCollection"`
 	}
 
-	if err := json.Unmarshal(body, &schwabOrder); err != nil {
+	if err := json.Unmarshal(resp.Body(), &schwabOrder); err != nil {
 		return nil, fmt.Errorf("failed to parse order response: %w", err)
 	}
 
@@ -531,7 +480,7 @@ func (c *TradingAccount) GetOrderStatus(ctx context.Context, orderID string) (*i
 		FilledQty:   schwabOrder.FilledQuantity,
 		FilledPrice: schwabOrder.Price,
 		Type:        investor.OrderType(schwabOrder.OrderType),
-		RawResponse: string(body),
+		RawResponse: string(resp.Body()),
 	}
 
 	if len(schwabOrder.OrderLegCollection) > 0 {
@@ -557,11 +506,9 @@ func (c *TradingAccount) CancelPendingOrder(ctx context.Context, orderID string)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("cancel order failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK && resp.StatusCode() != http.StatusNoContent {
+		return fmt.Errorf("cancel order failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	return nil
@@ -576,15 +523,9 @@ func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]inve
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read orders response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get orders failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get orders failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var schwabOrders []struct {
@@ -603,7 +544,7 @@ func (c *TradingAccount) GetRecentOrders(ctx context.Context, limit int) ([]inve
 		} `json:"orderLegCollection"`
 	}
 
-	if err := json.Unmarshal(body, &schwabOrders); err != nil {
+	if err := json.Unmarshal(resp.Body(), &schwabOrders); err != nil {
 		return nil, fmt.Errorf("failed to parse orders response: %w", err)
 	}
 
@@ -644,15 +585,9 @@ func (c *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read quote response: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get quote failed with status %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("get quote failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var quotes map[string]struct {
@@ -660,7 +595,7 @@ func (c *TradingAccount) LatestRegularMarketPrices(ctx context.Context, symbols 
 			RegularMarketLastPrice float64 `json:"regularMarketLastPrice"`
 		} `json:"regular"`
 	}
-	if err := json.Unmarshal(body, &quotes); err != nil {
+	if err := json.Unmarshal(resp.Body(), &quotes); err != nil {
 		return nil, fmt.Errorf("failed to parse quote response: %w", err)
 	}
 	prices := make(map[string]float64)

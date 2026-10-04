@@ -1,6 +1,5 @@
 # money-pies
 
-
 ## Config Directory
 
 The default location for this project's main config directory is `$HOME/.money-pies`.

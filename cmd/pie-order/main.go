@@ -65,7 +65,7 @@ func main() {
 	i := investor.NewInvestor(tradingAccount)
 	i.PlacePieOrder(ctx, 150000, investor.Pie{
 		Slices: slices,
-	}, preInvestedAmounts)
+	}, preInvestedAmounts, false)
 }
 
 func getTradingAccount() (investor.TradingAccount, error) {

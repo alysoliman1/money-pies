@@ -9,22 +9,27 @@ import (
 
 func TestValidatePie(t *testing.T) {
 	tests := []struct {
-		name string
-		pie  *Pie
-		want map[string]float64
-		err  error
+		name        string
+		pie         *Pie
+		want        map[string]float64
+		wantSymbols []string
+		err         error
 	}{
 		{
-			name: "pie is nil",
-			pie:  nil,
-			err:  fmt.Errorf("pie is nil"),
+			name:        "pie is nil",
+			pie:         nil,
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("pie is nil"),
 		},
 		{
 			name: "pie with no slices",
 			pie: &Pie{
 				Slices: []Slice{},
 			},
-			err: fmt.Errorf("pie has no slices"),
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("pie has no slices"),
 		},
 		{
 			name: "pie with one slice of weight < 100",
@@ -36,7 +41,9 @@ func TestValidatePie(t *testing.T) {
 					},
 				},
 			},
-			err: fmt.Errorf("total weight is not 100"),
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("total weight is not 100"),
 		},
 		{
 			name: "pie with one slice of weight > 100",
@@ -48,7 +55,9 @@ func TestValidatePie(t *testing.T) {
 					},
 				},
 			},
-			err: fmt.Errorf("weight for slice AAPL (150.000000) is not valid"),
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("weight for slice AAPL (150.000000) is not valid (must be between 0 and 100)"),
 		},
 		{
 			name: "pie with one slice with missing symbol",
@@ -59,7 +68,9 @@ func TestValidatePie(t *testing.T) {
 					},
 				},
 			},
-			err: fmt.Errorf("some slices are missing a symbol"),
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("some slices are missing a symbol"),
 		},
 		{
 			name: "pie with one slice with duplicate symbol",
@@ -75,7 +86,9 @@ func TestValidatePie(t *testing.T) {
 					},
 				},
 			},
-			err: fmt.Errorf("symbol AAPL is duplicated in the pie"),
+			want:        nil,
+			wantSymbols: nil,
+			err:         fmt.Errorf("symbol AAPL is duplicated in the pie"),
 		},
 		{
 			name: "pie with valid slices",
@@ -92,17 +105,19 @@ func TestValidatePie(t *testing.T) {
 				},
 			},
 			want: map[string]float64{
-				"AAPL": 50,
-				"NVDA": 50,
+				"AAPL": 0.5,
+				"NVDA": 0.5,
 			},
-			err: nil,
+			wantSymbols: []string{"AAPL", "NVDA"},
+			err:         nil,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, err := test.pie.ValidatePie()
+			got, gotSymbols, err := test.pie.ValidatePie()
 			assert.Equal(t, test.err, err)
 			assert.Equal(t, test.want, got)
+			assert.Equal(t, test.wantSymbols, gotSymbols)
 		})
 	}
 }
