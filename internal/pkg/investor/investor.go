@@ -55,6 +55,11 @@ func (i *Investor) PlacePieOrderWithoutFractionalShares(
 		}
 	}
 
+	// The account only knows the balances loaded by its last refresh.
+	if err := i.Account.RefreshAccount(ctx); err != nil {
+		return fmt.Errorf("failed to refresh account: %w", err)
+	}
+
 	cashAvailableForTrading, err := i.Account.CashAvailableForTrading(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get cash available for trading: %w", err)

@@ -228,13 +228,75 @@ type TradingAccount struct {
 
 // NewTradingAccount creates a new trading account
 func NewTradingAccount(ctx context.Context, client *Client, accountNumber string) (*TradingAccount, error) {
-	resp, err := client.makeRequest(ctx, "GET", accountsNumbersPath, nil)
-	if err != nil {
+	account := &TradingAccount{
+		accountNumber: accountNumber,
+		client:        client,
+	}
+	if err := account.RefreshAccount(ctx); err != nil {
 		return nil, err
+	}
+	return account, nil
+}
+
+// RefreshAccount reloads the account's type and balances from Schwab.
+// The account number's hash value never changes, so it is only looked up on the first call.
+// Documentation: https://developer.schwab.com/products/trader-api--individual/details/specifications/Retail%20Trader%20API%20Production
+// Endpoints: GET /trader/v1/accounts/accountNumbers and GET /trader/v1/accounts/{accountId}
+func (c *TradingAccount) RefreshAccount(ctx context.Context) error {
+	if c.hashValue == "" {
+		hashValue, err := c.lookupHashValue(ctx)
+		if err != nil {
+			return err
+		}
+		c.hashValue = hashValue
+	}
+
+	resp, err := c.client.makeRequest(ctx, "GET", fmt.Sprintf("%s/%s", accountsPath, c.hashValue), nil)
+	if err != nil {
+		return err
 	}
 
 	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
+		return fmt.Errorf("get account failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
+	}
+
+	var schwabAccount struct {
+		SecuritiesAccount struct {
+			Type            string `json:"type"`
+			CurrentBalances struct {
+				CashAvailableForTrading    float64 `json:"cashAvailableForTrading"`
+				CashAvailableForWithdrawal float64 `json:"cashAvailableForWithdrawal"`
+				TotalCash                  float64 `json:"totalCash"`
+				LongMarketValue            float64 `json:"longMarketValue"`
+				ShortMarketValue           float64 `json:"shortMarketValue"`
+				PendingDeposits            float64 `json:"pendingDeposits"`
+			} `json:"currentBalances"`
+		} `json:"securitiesAccount"`
+	}
+	if err := json.Unmarshal(resp.Body(), &schwabAccount); err != nil {
+		return fmt.Errorf("failed to parse account response: %w", err)
+	}
+
+	c.accountType = schwabAccount.SecuritiesAccount.Type
+	c.cashAvailableForTrading = schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForTrading
+	c.cashAvailableForWithdrawal = schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForWithdrawal
+	c.totalCash = schwabAccount.SecuritiesAccount.CurrentBalances.TotalCash
+	c.longMarketValue = schwabAccount.SecuritiesAccount.CurrentBalances.LongMarketValue
+	c.shortMarketValue = schwabAccount.SecuritiesAccount.CurrentBalances.ShortMarketValue
+	c.pendingDeposits = schwabAccount.SecuritiesAccount.CurrentBalances.PendingDeposits
+
+	return nil
+}
+
+// lookupHashValue retrieves the hash value that Schwab uses to identify the account number.
+func (c *TradingAccount) lookupHashValue(ctx context.Context) (string, error) {
+	resp, err := c.client.makeRequest(ctx, "GET", accountsNumbersPath, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if resp.StatusCode() != http.StatusOK {
+		return "", fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
 	}
 
 	var schwabAccountsNumbers []struct {
@@ -243,52 +305,15 @@ func NewTradingAccount(ctx context.Context, client *Client, accountNumber string
 	}
 
 	if err := json.Unmarshal(resp.Body(), &schwabAccountsNumbers); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts response: %w", err)
+		return "", fmt.Errorf("failed to parse accounts response: %w", err)
 	}
 
 	for _, account := range schwabAccountsNumbers {
-		if account.AccountNumber == accountNumber {
-			resp, err := client.makeRequest(ctx, "GET", fmt.Sprintf("%s/%s", accountsPath, account.HashValue), nil)
-			if err != nil {
-				return nil, err
-			}
-
-			if resp.StatusCode() != http.StatusOK {
-				return nil, fmt.Errorf("get accounts failed with status %d: %s", resp.StatusCode(), string(resp.Body()))
-			}
-
-			var schwabAccount struct {
-				SecuritiesAccount struct {
-					Type            string `json:"type"`
-					CurrentBalances struct {
-						CashAvailableForTrading    float64 `json:"cashAvailableForTrading"`
-						CashAvailableForWithdrawal float64 `json:"cashAvailableForWithdrawal"`
-						TotalCash                  float64 `json:"totalCash"`
-						LongMarketValue            float64 `json:"longMarketValue"`
-						ShortMarketValue           float64 `json:"shortMarketValue"`
-						PendingDeposits            float64 `json:"pendingDeposits"`
-					} `json:"currentBalances"`
-				} `json:"securitiesAccount"`
-			}
-			if err := json.Unmarshal(resp.Body(), &schwabAccount); err != nil {
-				return nil, fmt.Errorf("failed to parse account response: %w", err)
-			}
-
-			return &TradingAccount{
-				accountNumber:              account.AccountNumber,
-				cashAvailableForTrading:    schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForTrading,
-				cashAvailableForWithdrawal: schwabAccount.SecuritiesAccount.CurrentBalances.CashAvailableForWithdrawal,
-				totalCash:                  schwabAccount.SecuritiesAccount.CurrentBalances.TotalCash,
-				longMarketValue:            schwabAccount.SecuritiesAccount.CurrentBalances.LongMarketValue,
-				shortMarketValue:           schwabAccount.SecuritiesAccount.CurrentBalances.ShortMarketValue,
-				pendingDeposits:            schwabAccount.SecuritiesAccount.CurrentBalances.PendingDeposits,
-				accountType:                schwabAccount.SecuritiesAccount.Type,
-				hashValue:                  account.HashValue,
-				client:                     client,
-			}, nil
+		if account.AccountNumber == c.accountNumber {
+			return account.HashValue, nil
 		}
 	}
-	return nil, fmt.Errorf("account number not found")
+	return "", fmt.Errorf("account number not found")
 }
 
 func (c *TradingAccount) TotalCash(ctx context.Context) (float64, error) {

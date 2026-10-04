@@ -5,8 +5,13 @@ import (
 	"time"
 )
 
-// TradingAccount is the interface that all trading account integrations must implement.
-type TradingAccount interface {
+// ReadOnlyTradingAccount is the part of a trading account integration that only reads from the account.
+// Code that depends on it instead of TradingAccount has no way of placing or cancelling orders.
+type ReadOnlyTradingAccount interface {
+	// RefreshAccount reloads the account's type and balances from the brokerage.
+	// The balance and type methods below return the values loaded by the last refresh.
+	RefreshAccount(ctx context.Context) error
+
 	// LatestRegularMarketPrices retrieves the latest regular market prices for the given symbols.
 	LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error)
 
@@ -19,13 +24,13 @@ type TradingAccount interface {
 	// CashAvailableForWithdrawal retrieves the cash available for withdrawal in the trading account.
 	CashAvailableForWithdrawal(ctx context.Context) (float64, error)
 
-	// GetLongMarketValue retrieves the long market value in the trading account.
+	// LongMarketValue retrieves the long market value in the trading account.
 	LongMarketValue(ctx context.Context) (float64, error)
 
-	// GetShortMarketValue retrieves the short market value in the trading account.
+	// ShortMarketValue retrieves the short market value in the trading account.
 	ShortMarketValue(ctx context.Context) (float64, error)
 
-	// GetPendingDeposits retrieves the pending deposits in the trading account.
+	// PendingDeposits retrieves the pending deposits in the trading account.
 	PendingDeposits(ctx context.Context) (float64, error)
 
 	// Type retrieves the type of the trading account.
@@ -34,17 +39,22 @@ type TradingAccount interface {
 	// Positions retrieves the current positions for the account.
 	Positions(ctx context.Context) ([]Position, error)
 
-	// PlaceOrder places a new order for the account.
-	PlaceOrder(ctx context.Context, order OrderRequest) (*TradeOrder, error)
-
 	// GetOrderStatus retrieves the status of a specific order.
 	GetOrderStatus(ctx context.Context, orderID string) (*TradeOrder, error)
 
-	// CancelPendingOrder cancels a pending order.
-	CancelPendingOrder(ctx context.Context, orderID string) error
-
 	// GetRecentOrders retrieves recent orders for the account.
 	GetRecentOrders(ctx context.Context, limit int) ([]TradeOrder, error)
+}
+
+// TradingAccount is the interface that all trading account integrations must implement.
+type TradingAccount interface {
+	ReadOnlyTradingAccount
+
+	// PlaceOrder places a new order for the account.
+	PlaceOrder(ctx context.Context, order OrderRequest) (*TradeOrder, error)
+
+	// CancelPendingOrder cancels a pending order.
+	CancelPendingOrder(ctx context.Context, orderID string) error
 }
 
 // TradeOrder represents a trade order

@@ -5,6 +5,7 @@ It provides the following methods.
 
 | Method | Description |
 |--------|-------------|
+| `RefreshAccount(ctx)` | Reloads the account's type and balances from the brokerage. The balance and type methods return the values loaded by the last refresh. |
 | `LatestRegularMarketPrices(ctx, symbols)` | Retrieves the latest regular market prices for the given symbols. |
 | `TotalCash(ctx)` | Retrieves the total cash amount in the trading account. |
 | `CashAvailableForTrading(ctx)` | Retrieves the cash available for trading in the trading account. |
@@ -18,6 +19,10 @@ It provides the following methods.
 | `GetOrderStatus(ctx, orderID)` | Retrieves the status of a specific order. |
 | `CancelPendingOrder(ctx, orderID)` | Cancels a pending order. |
 | `GetRecentOrders(ctx, limit)` | Retrieves recent orders for the account. |
+
+`TradingAccount` embeds `ReadOnlyTradingAccount`, which holds every method above except
+`PlaceOrder` and `CancelPendingOrder`. Code that only needs to read from an account should
+depend on `ReadOnlyTradingAccount`.
 
 ## Pie
 
@@ -42,4 +47,4 @@ Since shares are whole, each $x_i$ must also be a multiple of $c_i$, so the impl
 
 The amount left uninvested is therefore always less than the cheapest share price. Step 2 is greedy: it favors staying close to the weights over finding the combination of shares that leaves the absolute smallest remainder.
 
-All orders are market buy orders. Nothing is ordered if the amount, the pie, the pre-invested amounts or the prices are invalid, or if the amount exceeds the cash available for trading. If the brokerage rejects an order, the remaining orders are still placed and the failures are returned together.
+All orders are market buy orders. Nothing is ordered if the amount, the pie, the pre-invested amounts or the prices are invalid, or if the amount exceeds the cash available for trading (the account is refreshed before this check). If the brokerage rejects an order, the remaining orders are still placed and the failures are returned together.

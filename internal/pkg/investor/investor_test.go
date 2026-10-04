@@ -13,6 +13,9 @@ import (
 // Calling any other method panics through the nil embedded interface.
 type fakeAccount struct {
 	TradingAccount
+	// brokerageCash is what the brokerage holds; cash only picks it up on RefreshAccount.
+	brokerageCash *float64
+	refreshErr    error
 	cash          float64
 	cashErr       error
 	prices        map[string]float64
@@ -20,6 +23,16 @@ type fakeAccount struct {
 	failSymbols   map[string]bool
 	pricesSymbols []string
 	placed        []OrderRequest
+}
+
+func (f *fakeAccount) RefreshAccount(ctx context.Context) error {
+	if f.refreshErr != nil {
+		return f.refreshErr
+	}
+	if f.brokerageCash != nil {
+		f.cash = *f.brokerageCash
+	}
+	return nil
 }
 
 func (f *fakeAccount) CashAvailableForTrading(ctx context.Context) (float64, error) {
@@ -188,6 +201,13 @@ func TestPlacePieOrderWithoutFractionalSharesInvalidInput(t *testing.T) {
 			wantErr: "is greater than cash available for trading",
 		},
 		{
+			name:    "account refresh fails",
+			account: &fakeAccount{cash: 5000, refreshErr: errors.New("brokerage down"), prices: validPrices},
+			amount:  1000,
+			pie:     validPie,
+			wantErr: "failed to refresh account: brokerage down",
+		},
+		{
 			name:    "cash lookup fails",
 			account: &fakeAccount{cashErr: errors.New("brokerage down"), prices: validPrices},
 			amount:  1000,
@@ -269,4 +289,23 @@ func TestPlacePieOrderWithoutFractionalSharesOrderFailure(t *testing.T) {
 		{Symbol: "NVDA", Action: OrderActionBuy, Type: OrderTypeMarket, Quantity: 5},
 		{Symbol: "MSFT", Action: OrderActionBuy, Type: OrderTypeMarket, Quantity: 10},
 	}, account.placed)
+}
+
+// The cash check must use the balance at the brokerage, not the one loaded when the account was created.
+func TestPlacePieOrderWithoutFractionalSharesRefreshesCash(t *testing.T) {
+	pie := pieOf(Slice{Symbol: "AAPL", Weight: 50}, Slice{Symbol: "NVDA", Weight: 50})
+	prices := map[string]float64{"AAPL": 100, "NVDA": 50}
+
+	brokerageCash := 500.0
+	stale := &fakeAccount{cash: 5000, brokerageCash: &brokerageCash, prices: prices}
+	err := NewInvestor(stale).PlacePieOrderWithoutFractionalShares(context.Background(), 1000, pie, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is greater than cash available for trading ($500.000000)")
+	assert.Empty(t, stale.placed)
+
+	brokerageCash = 5000
+	toppedUp := &fakeAccount{cash: 500, brokerageCash: &brokerageCash, prices: prices}
+	err = NewInvestor(toppedUp).PlacePieOrderWithoutFractionalShares(context.Background(), 1000, pie, nil)
+	require.NoError(t, err)
+	assert.Len(t, toppedUp.placed, 2)
 }

@@ -24,13 +24,14 @@ Go to `./cmd/schwab-oauth` and run `sh run.sh`.
 
 `./cmd/mcp-server` serves a brokerage's trading account over the
 [Model Context Protocol](https://modelcontextprotocol.io) (stdio transport).
-The tools are defined in `./internal/pkg/mcpserver` and wrap the read-only part of the
-`TradingAccount` interface: the server cannot place or cancel orders. Every tool call
-loads the account from the brokerage again, so results are never served from a cache.
+The tools are defined in `./internal/pkg/mcpserver` and wrap the `ReadOnlyTradingAccount` interface
+(the read-only part of `TradingAccount`): the server cannot place or cancel orders. The account is created once
+at startup; `get_account_summary` calls `RefreshAccount` before reading the balances, and the
+other tools query the brokerage directly on every call, so nothing is served from a cache.
 
 | Tool | TradingAccount methods |
 |------|------------------------|
-| `get_account_summary` | `Type`, `TotalCash`, `CashAvailableForTrading`, `CashAvailableForWithdrawal`, `LongMarketValue`, `ShortMarketValue`, `PendingDeposits` |
+| `get_account_summary` | `RefreshAccount`, `Type`, `TotalCash`, `CashAvailableForTrading`, `CashAvailableForWithdrawal`, `LongMarketValue`, `ShortMarketValue`, `PendingDeposits` |
 | `get_positions` | `Positions` |
 | `get_latest_prices` | `LatestRegularMarketPrices` |
 | `get_order_status` | `GetOrderStatus` |

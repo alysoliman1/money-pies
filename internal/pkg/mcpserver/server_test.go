@@ -14,12 +14,27 @@ import (
 )
 
 type fakeAccount struct {
-	totalCash    float64
-	positions    []investor.Position
-	orders       []investor.TradeOrder
-	priceSymbols []string
-	recentLimit  int
-	err          error
+	// brokerageCash is what the brokerage holds; totalCash only picks it up on RefreshAccount.
+	brokerageCash *float64
+	refreshes     int
+	refreshErr    error
+	totalCash     float64
+	positions     []investor.Position
+	orders        []investor.TradeOrder
+	priceSymbols  []string
+	recentLimit   int
+	err           error
+}
+
+func (f *fakeAccount) RefreshAccount(ctx context.Context) error {
+	f.refreshes++
+	if f.refreshErr != nil {
+		return f.refreshErr
+	}
+	if f.brokerageCash != nil {
+		f.totalCash = *f.brokerageCash
+	}
+	return nil
 }
 
 func (f *fakeAccount) LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error) {
@@ -70,20 +85,13 @@ func (f *fakeAccount) GetRecentOrders(ctx context.Context, limit int) ([]investo
 	return f.orders, f.err
 }
 
-// staticAccount returns an AccountProvider that always returns the given account.
-func staticAccount(account ReadOnlyAccount) AccountProvider {
-	return func(ctx context.Context) (ReadOnlyAccount, error) {
-		return account, nil
-	}
-}
-
 // connect starts the server over an in-memory transport and returns a connected client session.
-func connect(t *testing.T, provider AccountProvider) *mcp.ClientSession {
+func connect(t *testing.T, account investor.ReadOnlyTradingAccount) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
-	serverSession, err := New(provider).Connect(ctx, serverTransport, nil)
+	serverSession, err := New(account).Connect(ctx, serverTransport, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { serverSession.Close() })
 
@@ -119,7 +127,7 @@ func errorText(t *testing.T, result *mcp.CallToolResult) string {
 }
 
 func TestListTools(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{totalCash: 1000}))
+	session := connect(t, &fakeAccount{totalCash: 1000})
 
 	result, err := session.ListTools(context.Background(), nil)
 	require.NoError(t, err)
@@ -138,7 +146,7 @@ func TestListTools(t *testing.T) {
 }
 
 func TestAccountSummary(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{totalCash: 1000}))
+	session := connect(t, &fakeAccount{totalCash: 1000})
 
 	var summary AccountSummary
 	callTool(t, session, "get_account_summary", map[string]any{}, &summary)
@@ -158,7 +166,7 @@ func TestPositions(t *testing.T) {
 	account := &fakeAccount{positions: []investor.Position{
 		{Symbol: "AAPL", Quantity: 3, AveragePrice: 90, CurrentPrice: 100, MarketValue: 300, UnrealizedPL: 30, UnrealizedPLPct: 11.1},
 	}}
-	session := connect(t, staticAccount(account))
+	session := connect(t, account)
 
 	var out PositionsOutput
 	callTool(t, session, "get_positions", map[string]any{}, &out)
@@ -169,7 +177,7 @@ func TestPositions(t *testing.T) {
 }
 
 func TestPositionsEmpty(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{totalCash: 1000}))
+	session := connect(t, &fakeAccount{totalCash: 1000})
 
 	var out PositionsOutput
 	result := callTool(t, session, "get_positions", map[string]any{}, &out)
@@ -180,7 +188,7 @@ func TestPositionsEmpty(t *testing.T) {
 
 func TestLatestPrices(t *testing.T) {
 	account := &fakeAccount{}
-	session := connect(t, staticAccount(account))
+	session := connect(t, account)
 
 	var out LatestPricesOutput
 	callTool(t, session, "get_latest_prices", map[string]any{"symbols": []string{" aapl ", "MSFT", ""}}, &out)
@@ -191,7 +199,7 @@ func TestLatestPrices(t *testing.T) {
 
 func TestLatestPricesRequiresSymbols(t *testing.T) {
 	account := &fakeAccount{}
-	session := connect(t, staticAccount(account))
+	session := connect(t, account)
 
 	result := callTool(t, session, "get_latest_prices", map[string]any{"symbols": []string{}}, nil)
 
@@ -200,7 +208,7 @@ func TestLatestPricesRequiresSymbols(t *testing.T) {
 }
 
 func TestOrderStatus(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{totalCash: 1000}))
+	session := connect(t, &fakeAccount{totalCash: 1000})
 
 	var order Order
 	callTool(t, session, "get_order_status", map[string]any{"order_id": "abc"}, &order)
@@ -217,7 +225,7 @@ func TestRecentOrders(t *testing.T) {
 		{ID: "1", Symbol: "AAPL", Action: investor.OrderActionBuy, Type: investor.OrderTypeMarket, Status: investor.OrderStatusFilled},
 		{ID: "2", Symbol: "MSFT", Action: investor.OrderActionSell, Type: investor.OrderTypeMarket, Status: investor.OrderStatusCancelled},
 	}}
-	session := connect(t, staticAccount(account))
+	session := connect(t, account)
 
 	var out RecentOrdersOutput
 	callTool(t, session, "get_recent_orders", map[string]any{}, &out)
@@ -230,7 +238,7 @@ func TestRecentOrders(t *testing.T) {
 }
 
 func TestRecentOrdersLimitBounds(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{totalCash: 1000}))
+	session := connect(t, &fakeAccount{totalCash: 1000})
 
 	for _, limit := range []int{-1, maxRecentOrdersLimit + 1} {
 		result := callTool(t, session, "get_recent_orders", map[string]any{"limit": limit}, nil)
@@ -239,7 +247,7 @@ func TestRecentOrdersLimitBounds(t *testing.T) {
 }
 
 func TestBrokerageErrorIsToolError(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{err: errors.New("brokerage down")}))
+	session := connect(t, &fakeAccount{err: errors.New("brokerage down")})
 
 	for _, tc := range []struct {
 		tool string
@@ -258,31 +266,20 @@ func TestBrokerageErrorIsToolError(t *testing.T) {
 	}
 }
 
-func TestProviderErrorIsToolError(t *testing.T) {
-	session := connect(t, func(ctx context.Context) (ReadOnlyAccount, error) {
-		return nil, errors.New("not authenticated")
-	})
-
-	result := callTool(t, session, "get_positions", map[string]any{}, nil)
-
-	assert.Contains(t, errorText(t, result), "not authenticated")
-}
-
 func TestOrderStatusRequiresOrderID(t *testing.T) {
-	session := connect(t, staticAccount(&fakeAccount{}))
+	session := connect(t, &fakeAccount{})
 
 	result := callTool(t, session, "get_order_status", map[string]any{"order_id": "  "}, nil)
 
 	assert.Contains(t, errorText(t, result), "order_id is required")
 }
 
-// Brokerage accounts snapshot their balances at construction, so every tool call
-// must load a new account instead of reusing one from an earlier call.
+// Brokerage accounts only load their balances on RefreshAccount, so the summary
+// must refresh the account on every call instead of reading what was loaded before.
 func TestBalancesAreNotStale(t *testing.T) {
 	brokerageCash := 1000.0
-	session := connect(t, func(ctx context.Context) (ReadOnlyAccount, error) {
-		return &fakeAccount{totalCash: brokerageCash}, nil
-	})
+	account := &fakeAccount{brokerageCash: &brokerageCash}
+	session := connect(t, account)
 
 	var summary AccountSummary
 	callTool(t, session, "get_account_summary", map[string]any{}, &summary)
@@ -291,4 +288,26 @@ func TestBalancesAreNotStale(t *testing.T) {
 	brokerageCash = 250
 	callTool(t, session, "get_account_summary", map[string]any{}, &summary)
 	assert.Equal(t, 250.0, summary.TotalCash)
+	assert.Equal(t, 2, account.refreshes)
+}
+
+func TestRefreshErrorIsToolError(t *testing.T) {
+	session := connect(t, &fakeAccount{refreshErr: errors.New("not authenticated")})
+
+	result := callTool(t, session, "get_account_summary", map[string]any{}, nil)
+
+	assert.Contains(t, errorText(t, result), "failed to refresh account: not authenticated")
+}
+
+// Only the balances are loaded by RefreshAccount; the other tools read from the brokerage directly.
+func TestOnlySummaryRefreshesAccount(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	callTool(t, session, "get_positions", map[string]any{}, nil)
+	callTool(t, session, "get_latest_prices", map[string]any{"symbols": []string{"AAPL"}}, nil)
+	callTool(t, session, "get_order_status", map[string]any{"order_id": "abc"}, nil)
+	callTool(t, session, "get_recent_orders", map[string]any{}, nil)
+
+	assert.Equal(t, 0, account.refreshes)
 }

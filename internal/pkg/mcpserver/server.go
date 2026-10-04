@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/asoliman1/money-pies/internal/pkg/investor"
@@ -20,36 +21,10 @@ const (
 	maxRecentOrdersLimit     = 100
 )
 
-// ReadOnlyAccount is the read-only subset of investor.TradingAccount that the tools use.
-// The server depends on this instead of investor.TradingAccount so that it has no way
-// of placing or cancelling orders.
-type ReadOnlyAccount interface {
-	LatestRegularMarketPrices(ctx context.Context, symbols []string) (map[string]float64, error)
-	TotalCash(ctx context.Context) (float64, error)
-	CashAvailableForTrading(ctx context.Context) (float64, error)
-	CashAvailableForWithdrawal(ctx context.Context) (float64, error)
-	LongMarketValue(ctx context.Context) (float64, error)
-	ShortMarketValue(ctx context.Context) (float64, error)
-	PendingDeposits(ctx context.Context) (float64, error)
-	Type(ctx context.Context) (string, error)
-	Positions(ctx context.Context) ([]investor.Position, error)
-	GetOrderStatus(ctx context.Context, orderID string) (*investor.TradeOrder, error)
-	GetRecentOrders(ctx context.Context, limit int) ([]investor.TradeOrder, error)
-}
-
-var _ ReadOnlyAccount = investor.TradingAccount(nil)
-
-// AccountProvider returns the account that a tool call should run against.
-//
-// It is invoked on every tool call and must return an account freshly loaded from
-// the brokerage: brokerage implementations snapshot their balances when the account
-// is constructed, so reusing an account across calls would serve stale balances.
-type AccountProvider func(ctx context.Context) (ReadOnlyAccount, error)
-
 // New creates an MCP server whose tools wrap the read-only part of the investor.TradingAccount interface.
-func New(provider AccountProvider) *mcp.Server {
+func New(account investor.ReadOnlyTradingAccount) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: serverVersion}, nil)
-	h := &handlers{provider: provider}
+	h := &handlers{account: account}
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "get_account_summary",
@@ -85,7 +60,11 @@ func New(provider AccountProvider) *mcp.Server {
 }
 
 type handlers struct {
-	provider AccountProvider
+	account investor.ReadOnlyTradingAccount
+
+	// summaryMu keeps concurrent get_account_summary calls from refreshing the
+	// account while another call is reading its balances.
+	summaryMu sync.Mutex
 }
 
 type emptyInput struct{}
@@ -150,10 +129,15 @@ type RecentOrdersOutput struct {
 }
 
 func (h *handlers) accountSummary(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, AccountSummary, error) {
+	h.summaryMu.Lock()
+	defer h.summaryMu.Unlock()
+
+	// The balances and type are only as fresh as the last refresh.
 	var summary AccountSummary
-	account, err := h.provider(ctx)
+	account := h.account
+	err := account.RefreshAccount(ctx)
 	if err != nil {
-		return nil, summary, err
+		return nil, summary, fmt.Errorf("failed to refresh account: %w", err)
 	}
 
 	if summary.Type, err = account.Type(ctx); err != nil {
@@ -183,12 +167,7 @@ func (h *handlers) accountSummary(ctx context.Context, _ *mcp.CallToolRequest, _
 
 func (h *handlers) positions(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, PositionsOutput, error) {
 	out := PositionsOutput{Positions: []Position{}}
-	account, err := h.provider(ctx)
-	if err != nil {
-		return nil, out, err
-	}
-
-	positions, err := account.Positions(ctx)
+	positions, err := h.account.Positions(ctx)
 	if err != nil {
 		return nil, out, err
 	}
@@ -220,12 +199,7 @@ func (h *handlers) latestPrices(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return nil, out, errors.New("at least one symbol is required")
 	}
 
-	account, err := h.provider(ctx)
-	if err != nil {
-		return nil, out, err
-	}
-
-	prices, err := account.LatestRegularMarketPrices(ctx, symbols)
+	prices, err := h.account.LatestRegularMarketPrices(ctx, symbols)
 	if err != nil {
 		return nil, out, err
 	}
@@ -241,12 +215,7 @@ func (h *handlers) orderStatus(ctx context.Context, _ *mcp.CallToolRequest, in O
 		return nil, Order{}, errors.New("order_id is required")
 	}
 
-	account, err := h.provider(ctx)
-	if err != nil {
-		return nil, Order{}, err
-	}
-
-	order, err := account.GetOrderStatus(ctx, orderID)
+	order, err := h.account.GetOrderStatus(ctx, orderID)
 	if err != nil {
 		return nil, Order{}, err
 	}
@@ -267,12 +236,7 @@ func (h *handlers) recentOrders(ctx context.Context, _ *mcp.CallToolRequest, in 
 		return nil, out, fmt.Errorf("limit must be between 1 and %d", maxRecentOrdersLimit)
 	}
 
-	account, err := h.provider(ctx)
-	if err != nil {
-		return nil, out, err
-	}
-
-	orders, err := account.GetRecentOrders(ctx, limit)
+	orders, err := h.account.GetRecentOrders(ctx, limit)
 	if err != nil {
 		return nil, out, err
 	}

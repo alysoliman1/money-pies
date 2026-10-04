@@ -13,6 +13,7 @@ import (
 
 	"github.com/asoliman1/money-pies/internal/pkg/brokerages/alpaca"
 	"github.com/asoliman1/money-pies/internal/pkg/brokerages/schwab"
+	"github.com/asoliman1/money-pies/internal/pkg/investor"
 	"github.com/asoliman1/money-pies/internal/pkg/mcpserver"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -34,26 +35,21 @@ func main() {
 	// stdout carries the MCP protocol, so all logging must go to stderr.
 	log.SetOutput(os.Stderr)
 
-	provider, err := getAccountProvider()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	account, err := getAccount(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	// Fail fast on bad credentials instead of on the first tool call.
-	if _, err := provider(ctx); err != nil {
-		log.Fatalf("failed to connect to trading account: %v", err)
-	}
-
-	server := mcpserver.New(provider)
+	server := mcpserver.New(account)
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil && !errors.Is(err, context.Canceled) {
 		log.Fatalf("mcp server stopped: %v", err)
 	}
 }
 
-func getAccountProvider() (mcpserver.AccountProvider, error) {
+func getAccount(ctx context.Context) (investor.ReadOnlyTradingAccount, error) {
 	configDir := os.Getenv("MONEY_PIES_CONFIG")
 	if configDir == "" {
 		home, err := os.UserHomeDir()
@@ -68,9 +64,9 @@ func getAccountProvider() (mcpserver.AccountProvider, error) {
 
 	switch brokerageName {
 	case "schwab":
-		return schwabAccountProvider(clientConfigName)
+		return schwabAccount(ctx, clientConfigName)
 	case "alpaca":
-		return alpacaAccountProvider(clientConfigName)
+		return alpacaAccount(ctx, clientConfigName)
 	case "":
 		return nil, errors.New("BROKERAGE not specified")
 	default:
@@ -78,7 +74,7 @@ func getAccountProvider() (mcpserver.AccountProvider, error) {
 	}
 }
 
-func schwabAccountProvider(clientConfigName string) (mcpserver.AccountProvider, error) {
+func schwabAccount(ctx context.Context, clientConfigName string) (investor.ReadOnlyTradingAccount, error) {
 	accountNumber := os.Getenv("SCHWAB_ACCOUNT_NUMBER")
 	if accountNumber == "" {
 		return nil, errors.New("SCHWAB_ACCOUNT_NUMBER not specified")
@@ -98,12 +94,14 @@ func schwabAccountProvider(clientConfigName string) (mcpserver.AccountProvider, 
 		NewClient(clientConfig, schwabTimeoutInSeconds).
 		GetAccessTokenFromFile()
 
-	return func(ctx context.Context) (mcpserver.ReadOnlyAccount, error) {
-		return schwab.NewTradingAccount(ctx, client, accountNumber)
-	}, nil
+	account, err := schwab.NewTradingAccount(ctx, client, accountNumber)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create trading account: %v", err)
+	}
+	return account, nil
 }
 
-func alpacaAccountProvider(clientConfigName string) (mcpserver.AccountProvider, error) {
+func alpacaAccount(ctx context.Context, clientConfigName string) (investor.ReadOnlyTradingAccount, error) {
 	clientConfig, err := alpaca.LoadConfigFromFile(clientConfigName)
 	if err != nil {
 		return nil, err
@@ -116,7 +114,9 @@ func alpacaAccountProvider(clientConfigName string) (mcpserver.AccountProvider, 
 		log.Println("alpaca mode: LIVE TRADING")
 	}
 
-	return func(ctx context.Context) (mcpserver.ReadOnlyAccount, error) {
-		return alpaca.NewTradingAccount(ctx, client)
-	}, nil
+	account, err := alpaca.NewTradingAccount(ctx, client)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create trading account: %v", err)
+	}
+	return account, nil
 }
