@@ -18,13 +18,13 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// This command serves read-only access to the trading account of a brokerage over MCP
-// using the stdio transport. It cannot place or cancel orders.
+// This command serves the trading account of a brokerage over MCP using the stdio transport.
+// Besides reading the account, it can place and cancel real orders.
 //
 // Environment variables:
 //   BROKERAGE             schwab or alpaca (required)
 //   MONEY_PIES_CONFIG     config directory (defaults to $HOME/.money-pies)
-//   SCHWAB_ACCOUNT_NUMBER account number to read (required for schwab)
+//   SCHWAB_ACCOUNT_NUMBER account number to trade with (required for schwab)
 //
 // The brokerage's config is read from $MONEY_PIES_CONFIG/$BROKERAGE/client-config.json.
 // For schwab, authenticate first with ./cmd/schwab-oauth.
@@ -49,7 +49,7 @@ func main() {
 	}
 }
 
-func getAccount(ctx context.Context) (investor.ReadOnlyTradingAccount, error) {
+func getAccount(ctx context.Context) (investor.TradingAccount, error) {
 	configDir := os.Getenv("MONEY_PIES_CONFIG")
 	if configDir == "" {
 		home, err := os.UserHomeDir()
@@ -74,7 +74,7 @@ func getAccount(ctx context.Context) (investor.ReadOnlyTradingAccount, error) {
 	}
 }
 
-func schwabAccount(ctx context.Context, clientConfigName string) (investor.ReadOnlyTradingAccount, error) {
+func schwabAccount(ctx context.Context, clientConfigName string) (investor.TradingAccount, error) {
 	accountNumber := os.Getenv("SCHWAB_ACCOUNT_NUMBER")
 	if accountNumber == "" {
 		return nil, errors.New("SCHWAB_ACCOUNT_NUMBER not specified")
@@ -101,7 +101,7 @@ func schwabAccount(ctx context.Context, clientConfigName string) (investor.ReadO
 	return account, nil
 }
 
-func alpacaAccount(ctx context.Context, clientConfigName string) (investor.ReadOnlyTradingAccount, error) {
+func alpacaAccount(ctx context.Context, clientConfigName string) (investor.TradingAccount, error) {
 	clientConfig, err := alpaca.LoadConfigFromFile(clientConfigName)
 	if err != nil {
 		return nil, err

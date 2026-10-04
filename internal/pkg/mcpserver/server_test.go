@@ -23,6 +23,8 @@ type fakeAccount struct {
 	orders        []investor.TradeOrder
 	priceSymbols  []string
 	recentLimit   int
+	placed        []investor.OrderRequest
+	cancelled     []string
 	err           error
 }
 
@@ -80,13 +82,39 @@ func (f *fakeAccount) GetOrderStatus(ctx context.Context, orderID string) (*inve
 	}, nil
 }
 
+func (f *fakeAccount) PlaceOrder(ctx context.Context, order investor.OrderRequest) (*investor.TradeOrder, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.placed = append(f.placed, order)
+	return &investor.TradeOrder{
+		ID:          "order-1",
+		Symbol:      order.Symbol,
+		Action:      order.Action,
+		Type:        order.Type,
+		Quantity:    order.Quantity,
+		LimitPrice:  order.LimitPrice,
+		Status:      investor.OrderStatusPending,
+		SubmittedAt: time.Date(2026, 1, 2, 15, 4, 5, 0, time.UTC),
+		RawResponse: map[string]any{"secret": "raw"},
+	}, nil
+}
+
+func (f *fakeAccount) CancelPendingOrder(ctx context.Context, orderID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cancelled = append(f.cancelled, orderID)
+	return nil
+}
+
 func (f *fakeAccount) GetRecentOrders(ctx context.Context, limit int) ([]investor.TradeOrder, error) {
 	f.recentLimit = limit
 	return f.orders, f.err
 }
 
 // connect starts the server over an in-memory transport and returns a connected client session.
-func connect(t *testing.T, account investor.ReadOnlyTradingAccount) *mcp.ClientSession {
+func connect(t *testing.T, account investor.TradingAccount) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -142,6 +170,8 @@ func TestListTools(t *testing.T) {
 		"get_latest_prices":   true,
 		"get_order_status":    true,
 		"get_recent_orders":   true,
+		"place_order":         false,
+		"cancel_order":        false,
 	}, readOnly)
 }
 
@@ -258,6 +288,8 @@ func TestBrokerageErrorIsToolError(t *testing.T) {
 		{"get_latest_prices", map[string]any{"symbols": []string{"AAPL"}}},
 		{"get_order_status", map[string]any{"order_id": "abc"}},
 		{"get_recent_orders", map[string]any{}},
+		{"place_order", map[string]any{"symbol": "AAPL", "action": "BUY", "type": "MARKET", "quantity": 1}},
+		{"cancel_order", map[string]any{"order_id": "abc"}},
 	} {
 		t.Run(tc.tool, func(t *testing.T) {
 			result := callTool(t, session, tc.tool, tc.args, nil)
@@ -310,4 +342,147 @@ func TestOnlySummaryRefreshesAccount(t *testing.T) {
 	callTool(t, session, "get_recent_orders", map[string]any{}, nil)
 
 	assert.Equal(t, 0, account.refreshes)
+}
+
+func TestPlaceOrder(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	var order Order
+	result := callTool(t, session, "place_order", map[string]any{
+		"symbol":      "aapl",
+		"action":      "sell",
+		"type":        "limit",
+		"quantity":    2.5,
+		"limit_price": 99.5,
+	}, &order)
+
+	require.Len(t, account.placed, 1)
+	placed := account.placed[0]
+	assert.Equal(t, "AAPL", placed.Symbol)
+	assert.Equal(t, investor.OrderActionSell, placed.Action)
+	assert.Equal(t, investor.OrderTypeLimit, placed.Type)
+	assert.Equal(t, 2.5, placed.Quantity)
+	require.NotNil(t, placed.LimitPrice)
+	assert.Equal(t, 99.5, *placed.LimitPrice)
+
+	assert.Equal(t, "order-1", order.ID)
+	assert.Equal(t, "PENDING", order.Status)
+	assert.Equal(t, "2026-01-02T15:04:05Z", order.SubmittedAt)
+	assert.Empty(t, order.FilledAt)
+
+	// The brokerage's raw response must not leak into the tool output.
+	raw, err := json.Marshal(result.StructuredContent)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "secret")
+}
+
+func TestPlaceMarketOrder(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	callTool(t, session, "place_order", map[string]any{"symbol": "MSFT", "action": "BUY", "type": "MARKET", "quantity": 3}, nil)
+
+	assert.Equal(t, []investor.OrderRequest{
+		{Symbol: "MSFT", Action: investor.OrderActionBuy, Type: investor.OrderTypeMarket, Quantity: 3},
+	}, account.placed)
+}
+
+func TestPlaceOrderValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr string
+	}{
+		{
+			name:    "blank symbol",
+			args:    map[string]any{"symbol": " ", "action": "BUY", "type": "MARKET", "quantity": 1},
+			wantErr: "symbol is required",
+		},
+		{
+			name:    "unknown action",
+			args:    map[string]any{"symbol": "AAPL", "action": "HOLD", "type": "MARKET", "quantity": 1},
+			wantErr: "action must be BUY or SELL",
+		},
+		{
+			name:    "unknown type",
+			args:    map[string]any{"symbol": "AAPL", "action": "BUY", "type": "STOP", "quantity": 1},
+			wantErr: "type must be MARKET or LIMIT",
+		},
+		{
+			name:    "zero quantity",
+			args:    map[string]any{"symbol": "AAPL", "action": "BUY", "type": "MARKET", "quantity": 0},
+			wantErr: "quantity must be greater than zero",
+		},
+		{
+			name:    "negative quantity",
+			args:    map[string]any{"symbol": "AAPL", "action": "SELL", "type": "MARKET", "quantity": -1},
+			wantErr: "quantity must be greater than zero",
+		},
+		{
+			name:    "limit order without price",
+			args:    map[string]any{"symbol": "AAPL", "action": "BUY", "type": "LIMIT", "quantity": 1},
+			wantErr: "limit_price must be greater than zero",
+		},
+		{
+			name:    "limit order with zero price",
+			args:    map[string]any{"symbol": "AAPL", "action": "BUY", "type": "LIMIT", "quantity": 1, "limit_price": 0},
+			wantErr: "limit_price must be greater than zero",
+		},
+		{
+			name:    "market order with limit price",
+			args:    map[string]any{"symbol": "AAPL", "action": "BUY", "type": "MARKET", "quantity": 1, "limit_price": 10},
+			wantErr: "limit_price is not allowed for MARKET orders",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			account := &fakeAccount{}
+			session := connect(t, account)
+
+			result := callTool(t, session, "place_order", tt.args, nil)
+
+			assert.Contains(t, errorText(t, result), tt.wantErr)
+			assert.Empty(t, account.placed, "invalid order must not reach the brokerage")
+		})
+	}
+}
+
+func TestPlaceOrderMissingRequiredField(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	// The SDK rejects this against the input schema; depending on the SDK version
+	// that is either a protocol error or a tool error.
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "place_order",
+		Arguments: map[string]any{"symbol": "AAPL", "action": "BUY", "type": "MARKET"},
+	})
+
+	if err == nil {
+		assert.True(t, result.IsError)
+	}
+	assert.Empty(t, account.placed)
+}
+
+func TestCancelOrder(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	var out CancelOrderOutput
+	callTool(t, session, "cancel_order", map[string]any{"order_id": " abc "}, &out)
+
+	assert.Equal(t, CancelOrderOutput{OrderID: "abc", Cancelled: true}, out)
+	assert.Equal(t, []string{"abc"}, account.cancelled)
+}
+
+func TestCancelOrderRequiresOrderID(t *testing.T) {
+	account := &fakeAccount{}
+	session := connect(t, account)
+
+	result := callTool(t, session, "cancel_order", map[string]any{"order_id": "  "}, nil)
+
+	assert.Contains(t, errorText(t, result), "order_id is required")
+	assert.Empty(t, account.cancelled)
 }

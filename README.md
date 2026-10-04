@@ -24,8 +24,9 @@ Go to `./cmd/schwab-oauth` and run `sh run.sh`.
 
 `./cmd/mcp-server` serves a brokerage's trading account over the
 [Model Context Protocol](https://modelcontextprotocol.io) (stdio transport).
-The tools are defined in `./internal/pkg/mcpserver` and wrap the `ReadOnlyTradingAccount` interface
-(the read-only part of `TradingAccount`): the server cannot place or cancel orders. The account is created once
+The tools are defined in `./internal/pkg/mcpserver` and wrap the `TradingAccount` interface.
+`place_order` and `cancel_order` act on the real account: an order is sent to the brokerage as soon as
+the tool is called. The account is created once
 at startup; `get_account_summary` calls `RefreshAccount` before reading the balances, and the
 other tools query the brokerage directly on every call, so nothing is served from a cache.
 
@@ -36,12 +37,14 @@ other tools query the brokerage directly on every call, so nothing is served fro
 | `get_latest_prices` | `LatestRegularMarketPrices` |
 | `get_order_status` | `GetOrderStatus` |
 | `get_recent_orders` | `GetRecentOrders` |
+| `place_order` | `PlaceOrder` |
+| `cancel_order` | `CancelPendingOrder` |
 
 Environment variables:
 
 - `BROKERAGE`: `schwab` or `alpaca` (required)
 - `MONEY_PIES_CONFIG`: config directory (defaults to `$HOME/.money-pies`)
-- `SCHWAB_ACCOUNT_NUMBER`: account number to read (required for schwab)
+- `SCHWAB_ACCOUNT_NUMBER`: account number to trade with (required for schwab)
 
 Example registration with Claude Code:
 ```bash

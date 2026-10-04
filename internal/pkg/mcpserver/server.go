@@ -21,8 +21,9 @@ const (
 	maxRecentOrdersLimit     = 100
 )
 
-// New creates an MCP server whose tools wrap the read-only part of the investor.TradingAccount interface.
-func New(account investor.ReadOnlyTradingAccount) *mcp.Server {
+// New creates an MCP server whose tools wrap the investor.TradingAccount interface.
+// The place_order and cancel_order tools act on the real account.
+func New(account investor.TradingAccount) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: serverName, Version: serverVersion}, nil)
 	h := &handlers{account: account}
 
@@ -56,11 +57,23 @@ func New(account investor.ReadOnlyTradingAccount) *mcp.Server {
 		Annotations: &mcp.ToolAnnotations{Title: "Get recent orders", ReadOnlyHint: true},
 	}, h.recentOrders)
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "place_order",
+		Description: "Place a buy or sell order in the trading account. This submits a real order to the brokerage as soon as it is called, so confirm the symbol, action, quantity and order type with the user first.",
+		Annotations: &mcp.ToolAnnotations{Title: "Place order", DestructiveHint: boolPtr(true)},
+	}, h.placeOrder)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "cancel_order",
+		Description: "Cancel a pending order by its ID.",
+		Annotations: &mcp.ToolAnnotations{Title: "Cancel order", DestructiveHint: boolPtr(true), IdempotentHint: true},
+	}, h.cancelOrder)
+
 	return server
 }
 
 type handlers struct {
-	account investor.ReadOnlyTradingAccount
+	account investor.TradingAccount
 
 	// summaryMu keeps concurrent get_account_summary calls from refreshing the
 	// account while another call is reading its balances.
@@ -101,6 +114,14 @@ type LatestPricesOutput struct {
 	Prices map[string]float64 `json:"prices" jsonschema:"latest regular market price keyed by symbol"`
 }
 
+type PlaceOrderInput struct {
+	Symbol     string   `json:"symbol" jsonschema:"ticker symbol to trade, e.g. AAPL"`
+	Action     string   `json:"action" jsonschema:"BUY or SELL"`
+	Type       string   `json:"type" jsonschema:"MARKET or LIMIT"`
+	Quantity   float64  `json:"quantity" jsonschema:"number of shares, must be greater than zero"`
+	LimitPrice *float64 `json:"limit_price,omitempty" jsonschema:"limit price per share, required for LIMIT orders and not allowed for MARKET orders"`
+}
+
 type OrderIDInput struct {
 	OrderID string `json:"order_id" jsonschema:"the brokerage's ID of the order"`
 }
@@ -126,6 +147,11 @@ type Order struct {
 
 type RecentOrdersOutput struct {
 	Orders []Order `json:"orders"`
+}
+
+type CancelOrderOutput struct {
+	OrderID   string `json:"order_id"`
+	Cancelled bool   `json:"cancelled"`
 }
 
 func (h *handlers) accountSummary(ctx context.Context, _ *mcp.CallToolRequest, _ emptyInput) (*mcp.CallToolResult, AccountSummary, error) {
@@ -246,6 +272,71 @@ func (h *handlers) recentOrders(ctx context.Context, _ *mcp.CallToolRequest, in 
 	return nil, out, nil
 }
 
+func (h *handlers) placeOrder(ctx context.Context, _ *mcp.CallToolRequest, in PlaceOrderInput) (*mcp.CallToolResult, Order, error) {
+	request, err := toOrderRequest(in)
+	if err != nil {
+		return nil, Order{}, err
+	}
+
+	order, err := h.account.PlaceOrder(ctx, request)
+	if err != nil {
+		return nil, Order{}, err
+	}
+	if order == nil {
+		return nil, Order{}, errors.New("brokerage returned no order")
+	}
+	return nil, toOrder(*order), nil
+}
+
+func (h *handlers) cancelOrder(ctx context.Context, _ *mcp.CallToolRequest, in OrderIDInput) (*mcp.CallToolResult, CancelOrderOutput, error) {
+	out := CancelOrderOutput{OrderID: strings.TrimSpace(in.OrderID)}
+	if out.OrderID == "" {
+		return nil, out, errors.New("order_id is required")
+	}
+
+	if err := h.account.CancelPendingOrder(ctx, out.OrderID); err != nil {
+		return nil, out, err
+	}
+	out.Cancelled = true
+	return nil, out, nil
+}
+
+// toOrderRequest validates the tool input before anything is sent to the brokerage.
+func toOrderRequest(in PlaceOrderInput) (investor.OrderRequest, error) {
+	request := investor.OrderRequest{
+		Symbol:     normalizeSymbol(in.Symbol),
+		Action:     investor.OrderAction(strings.ToUpper(strings.TrimSpace(in.Action))),
+		Type:       investor.OrderType(strings.ToUpper(strings.TrimSpace(in.Type))),
+		Quantity:   in.Quantity,
+		LimitPrice: in.LimitPrice,
+	}
+
+	if request.Symbol == "" {
+		return request, errors.New("symbol is required")
+	}
+	if request.Action != investor.OrderActionBuy && request.Action != investor.OrderActionSell {
+		return request, fmt.Errorf("action must be %s or %s", investor.OrderActionBuy, investor.OrderActionSell)
+	}
+	if request.Quantity <= 0 {
+		return request, errors.New("quantity must be greater than zero")
+	}
+
+	switch request.Type {
+	case investor.OrderTypeMarket:
+		if request.LimitPrice != nil {
+			return request, errors.New("limit_price is not allowed for MARKET orders")
+		}
+	case investor.OrderTypeLimit:
+		if request.LimitPrice == nil || *request.LimitPrice <= 0 {
+			return request, errors.New("limit_price must be greater than zero for LIMIT orders")
+		}
+	default:
+		return request, fmt.Errorf("type must be %s or %s", investor.OrderTypeMarket, investor.OrderTypeLimit)
+	}
+
+	return request, nil
+}
+
 func toOrder(o investor.TradeOrder) Order {
 	order := Order{
 		ID:          o.ID,
@@ -269,4 +360,8 @@ func toOrder(o investor.TradeOrder) Order {
 
 func normalizeSymbol(symbol string) string {
 	return strings.ToUpper(strings.TrimSpace(symbol))
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }
